@@ -85,6 +85,51 @@ public class PackageDigestTests
         Assert.Null(PackageDigest.ParseContents("garbage line\n"));
     }
 
+    /// <summary>A multi-line description (binutils, coreutils, ...) goes on in untabbed lines, blank ones included.</summary>
+    private const string MultiLine = """
+        package-attributes:
+        	name: binutils
+        	description: The GNU Binutils.
+
+        The main ones are:
+        - ld - the GNU linker.
+        Build time: whatever, release date: never
+        	vendor: Haiku Project
+        	packager: RenkuPorts Builder vm1 <noreply@renkuos.org>
+        bin                                      0  2026-11-17 22:48:36  drwxr-xr-x
+          ld                                 94208  2026-11-17 22:48:36  -rwxr-xr-x
+        .PackageInfo                           750  2026-11-17 22:48:37  -rw-r--r--
+        """;
+
+    [Fact]
+    public void Listing_skips_the_continuation_lines_of_multi_line_metadata_but_metadata_keeps_them()
+    {
+        Assert.Equal(["bin", "bin/ld", ".PackageInfo"], PackageDigest.ParseContents(MultiLine)!.Select(e => e.Path));
+        var meta = PackageDigest.Metadata(MultiLine.Split("bin ")[0]);
+        Assert.Equal("name: binutils\ndescription: The GNU Binutils.\nThe main ones are:\n- ld - the GNU linker.\nBuild time: whatever, release date: never\nvendor: Haiku Project", meta);
+        Assert.NotEqual(meta, PackageDigest.Metadata(MultiLine.Split("bin ")[0].Replace("GNU linker", "GNU linker!")));
+
+        Assert.Null(PackageDigest.ParseContents(MultiLine + "\nstray text after the entries\n", out var bad)); // only the metadata block may hold free text
+        Assert.Equal("stray text after the entries", bad);
+        Assert.Null(PackageDigest.ParseContents("The main ones are:\n" + MultiLine.Split("\n", 2)[1])); // nor without a package-attributes: header
+    }
+
+    [Fact]
+    public async Task A_raw_comparison_says_so_and_why()
+    {
+        var dir = Directory.CreateTempSubdirectory("raw-").FullName;
+        var (da, db) = (Directory.CreateDirectory(Path.Combine(dir, "a")).FullName, Directory.CreateDirectory(Path.Combine(dir, "b")).FullName);
+        const string pkg = "p-1-1-arm64.hpkg";
+        File.WriteAllText(Path.Combine(da, pkg), "abc");
+        File.WriteAllText(Path.Combine(db, pkg), "abd");
+        var la = await PackageDigest.RawAsync(Path.Combine(da, pkg), pkg, "package list -a failed", default);
+        var lb = await PackageDigest.RawAsync(Path.Combine(db, pkg), pkg, "package list -a failed", default);
+        var diff = await PackageDigest.CompareAsync(1, new Dictionary<string, PackageListing> { [pkg] = la }, new Dictionary<string, PackageListing> { [pkg] = lb },
+            _ => Task.FromResult(da), _ => Task.FromResult(db), default);
+        Assert.Equal("compared as raw bytes: package list -a failed", Assert.Single(diff.Files).Note);
+        Directory.Delete(dir, true);
+    }
+
     [Fact]
     public void Metadata_drops_the_packager_which_names_the_building_client()
     {
@@ -101,7 +146,7 @@ public class PackageDigestTests
         var tools = new HaikuTools(HaikuToolsFactAttribute.ToolsDir);
         var work = Directory.CreateTempSubdirectory("digest-").FullName;
         var n = 0;
-        async Task<(string Digest, PackageListing Listing, string Dir, string File)> Make(Action<string>? change = null, string summary = "Test", DateTime? mtime = null, string packager = "test")
+        async Task<(string Digest, PackageListing Listing, string Dir, string File)> Make(Action<string>? change = null, string summary = "Test", DateTime? mtime = null, string packager = "test", string description = "Test package")
         {
             var src = Path.Combine(work, $"src{++n}");
             Directory.CreateDirectory(Path.Combine(src, "bin"));
@@ -117,7 +162,7 @@ public class PackageDigestTests
                 version 1.0-1
                 architecture arm64
                 summary "{{summary}}"
-                description "Test package"
+                description "{{description}}"
                 packager "{{packager}} <test@example.invalid>"
                 vendor "Haiku Project"
                 copyrights "2026 test"
@@ -141,6 +186,13 @@ public class PackageDigestTests
         var otherClient = await Make(packager: "RenkuPorts Builder box50");
         Assert.Equal(a.Digest, otherClient.Digest); // the packager names the building client, so it is not content
         Assert.DoesNotContain(a.Listing.Entries, e => e.Path == ".PackageInfo");
+
+        // a multi-line description (as binutils, coreutils, bison, diffutils and ca_root_certificates have) made these raw
+        const string paragraphs = "Test package.\n\nIt has a second paragraph:\n- and a list.";
+        var multi = await Make(description: paragraphs);
+        Assert.Equal(multi.Digest, (await Make(description: paragraphs, mtime: new DateTime(2026, 6, 6, 12, 0, 0))).Digest);
+        Assert.Contains("- and a list.", multi.Listing.Metadata);
+        Assert.NotEqual(multi.Digest, (await Make(description: paragraphs + "!")).Digest);
 
         var bytes = await Make(src => File.WriteAllText(Path.Combine(src, "bin", "hi"), "hellp\n"));
         var mode = await Make(src => File.SetUnixFileMode(Path.Combine(src, "bin", "hi"), (UnixFileMode)0b110_100_100));

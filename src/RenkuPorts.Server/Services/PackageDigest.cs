@@ -14,9 +14,9 @@ public record ListingEntry(string Path, string Record, string? Sha256, long Size
 /// <summary>
 /// What a package's content digest is computed from: <see cref="Metadata"/> (<c>package list -i</c>, time and packager fields
 /// dropped) and every entry but the package-root <c>.PackageInfo</c>. <see cref="Raw"/>: the file could not be read as a package (or the tools are missing), so it is compared as
-/// one opaque file named after the package.
+/// one opaque file named after the package; <see cref="RawReason"/> says why.
 /// </summary>
-public record PackageListing(string Metadata, List<ListingEntry> Entries, bool Raw);
+public record PackageListing(string Metadata, List<ListingEntry> Entries, bool Raw, string? RawReason = null);
 
 /// <summary>A differing byte run: offset, and both sides with a little context, non-printables escaped.</summary>
 public record ByteRun(long Offset, string A, string B);
@@ -69,69 +69,85 @@ public static partial class PackageDigest
             packages.OrderBy(p => p.FileName, StringComparer.Ordinal).Select(p => $"{p.FileName} {p.Digest}\n")))));
 
     /// <summary>The listing of a file that is compared as opaque bytes.</summary>
-    public static async Task<PackageListing> RawAsync(string hpkg, string fileName, CancellationToken ct)
+    public static async Task<PackageListing> RawAsync(string hpkg, string fileName, string reason, CancellationToken ct)
     {
         await using var f = File.OpenRead(hpkg);
         var sha = Convert.ToHexStringLower(await SHA256.HashDataAsync(f, ct));
-        return new("", [new(fileName, $"raw {f.Length}", sha, f.Length)], true);
+        return new("", [new(fileName, $"raw {f.Length}", sha, f.Length)], true, reason);
     }
 
     /// <summary>
     /// Lists <paramref name="hpkg"/> with the package tool and extracts it into <paramref name="extractDir"/> to hash the files.
-    /// Falls back to <see cref="RawAsync"/> when the tools are missing or the file is not a package the tool can read.
+    /// Falls back to <see cref="RawAsync"/> (with the failed step as <see cref="PackageListing.RawReason"/>) when the tools are
+    /// missing or the file is not a package the tool can read.
     /// </summary>
     public static async Task<PackageListing> ListAsync(HaikuTools tools, string hpkg, string fileName, string extractDir, CancellationToken ct)
     {
-        if (!tools.Available) return await RawAsync(hpkg, fileName, ct);
-        var info = await tools.TryRunAsync("package", ["list", "-i", hpkg], ct);
-        var contents = info is null ? null : await tools.TryRunAsync("package", ["list", "-a", hpkg], ct);
-        if (contents is null || ParseContents(contents) is not { } entries) return await RawAsync(hpkg, fileName, ct);
+        if (!tools.Available) return await RawAsync(hpkg, fileName, "the Haiku package tools are not available", ct);
+        if (await tools.TryRunAsync("package", ["list", "-i", hpkg], ct) is not { } info) return await RawAsync(hpkg, fileName, "package list -i failed", ct);
+        if (await tools.TryRunAsync("package", ["list", "-a", hpkg], ct) is not { } contents) return await RawAsync(hpkg, fileName, "package list -a failed", ct);
+        if (ParseContents(contents, out var bad) is not { } entries) return await RawAsync(hpkg, fileName, $"unparsable package list -a line: {bad}", ct);
         Directory.CreateDirectory(extractDir);
-        if (await tools.TryRunAsync("package", ["extract", "-C", extractDir, hpkg], ct) is null) return await RawAsync(hpkg, fileName, ct);
+        if (await tools.TryRunAsync("package", ["extract", "-C", extractDir, hpkg], ct) is null) return await RawAsync(hpkg, fileName, "package extract failed", ct);
         var hashed = new List<ListingEntry>(entries.Count);
         foreach (var e in entries)
         {
             if (e.Path == ".PackageInfo") continue; // the metadata again, with the packager (the building client); Metadata covers it
             if (!e.Record.StartsWith('-')) { hashed.Add(e); continue; }
             var path = Path.Combine(extractDir, e.Path);
-            if (!File.Exists(path)) return await RawAsync(hpkg, fileName, ct);
+            if (!File.Exists(path)) return await RawAsync(hpkg, fileName, $"listed file not extracted: {e.Path}", ct);
             await using var f = File.OpenRead(path);
             hashed.Add(e with { Sha256 = Convert.ToHexStringLower(await SHA256.HashDataAsync(f, ct)) });
         }
-        return new(Metadata(info!), hashed, false);
+        return new(Metadata(info), hashed, false);
     }
 
     /// <summary>
     /// The attribute lines of <c>package list -i</c>, trimmed, without keys that mention a date or time and without the
-    /// packager, which names the client that built the package and so differs between otherwise identical builds.
+    /// packager, which names the client that built the package and so differs between otherwise identical builds. Keys are
+    /// tab-indented; the untabbed continuation lines of a multi-line value (a description) are always kept.
     /// </summary>
-    public static string Metadata(string listInfo) => string.Join('\n', listInfo.Split('\n').Select(l => l.Trim())
-        .Where(l => l.Length > 0 && l != "package-attributes:" && !TimeKey().IsMatch(l) && !PackagerKey().IsMatch(l)));
+    public static string Metadata(string listInfo) => string.Join('\n', listInfo.Split('\n')
+        .Where(l => !(l.StartsWith('\t') && (TimeKey().IsMatch(l.Trim()) || PackagerKey().IsMatch(l.Trim()))))
+        .Select(l => l.Trim()).Where(l => l.Length > 0 && l != "package-attributes:"));
 
     /// <summary>
     /// Parses the entries of <c>package list -a</c> (lines after the tab-indented metadata): two spaces of indent per directory
     /// level, then name, size, date and time, permissions and an optional <c>-&gt; target</c>; attribute lines are
     /// <c>&lt;name size 'type'&gt;</c>, one level deeper than their entry. The time is dropped. Null if a line does not parse.
+    /// The metadata block starts with <c>package-attributes:</c> and runs to the first top-level entry: a multi-line value
+    /// (a description with paragraphs) continues on untabbed lines, which are skipped there (<see cref="Metadata"/> covers them).
     /// </summary>
-    public static List<ListingEntry>? ParseContents(string listA)
+    public static List<ListingEntry>? ParseContents(string listA) => ParseContents(listA, out _);
+
+    /// <inheritdoc cref="ParseContents(string)"/>
+    /// <param name="bad">The first line that does not parse, when the result is null.</param>
+    public static List<ListingEntry>? ParseContents(string listA, out string? bad)
     {
+        bad = null;
         var entries = new List<(string Path, string Record, long Size, List<string> Attrs)>();
         var dirs = new List<string>();
+        var inMetadata = false;
         foreach (var raw in listA.Split('\n'))
         {
             var line = raw.TrimEnd('\r');
-            if (line.Length == 0 || line.StartsWith('\t') || line == "package-attributes:") continue;
+            if (line == "package-attributes:" && entries.Count == 0) { inMetadata = true; continue; }
+            if (line.Length == 0 || line.StartsWith('\t')) continue;
+            if (inMetadata)
+            {
+                if (EntryLine().Match(line) is not { Success: true } top || top.Groups["indent"].Length > 0) continue; // a multi-line value goes on
+                inMetadata = false;
+            }
             if (AttrLine().Match(line) is { Success: true } a)
             {
                 var owner = a.Groups["indent"].Length / 2 - 1;
-                if (owner < 0 || entries.Count == 0 || owner >= dirs.Count + 1) return null;
+                if (owner < 0 || entries.Count == 0 || owner >= dirs.Count + 1) { bad = line; return null; }
                 entries[^1].Attrs.Add($"{a.Groups["name"].Value}:{a.Groups["type"].Value}:{a.Groups["size"].Value}");
                 continue;
             }
             var m = EntryLine().Match(line);
-            if (!m.Success) return null;
             var depth = m.Groups["indent"].Length / 2;
-            if (depth > dirs.Count) return null;
+            if (!m.Success || depth > dirs.Count) { bad = line; return null; }
             dirs.RemoveRange(depth, dirs.Count - depth);
             var path = string.Join('/', dirs.Append(m.Groups["name"].Value));
             var perm = m.Groups["perm"].Value;
@@ -179,7 +195,10 @@ public static partial class PackageDigest
                 {
                     await using var fa = File.OpenRead(Path.Combine(await dirA(pkg), path));
                     await using var fb = File.OpenRead(Path.Combine(await dirB(pkg), path));
-                    files.Add(await CompareBytesAsync(pkg, path, fa, fb, ct));
+                    var d = await CompareBytesAsync(pkg, path, fa, fb, ct);
+                    // both raw here: a raw listing's only entry is the package file, which a parsed listing never has
+                    if (la.Raw) d = d with { Note = $"compared as raw bytes: {la.RawReason ?? lb.RawReason ?? "reason not recorded"}{(d.Note is null ? "" : $"; {d.Note}")}" };
+                    files.Add(d);
                 }
             }
         }

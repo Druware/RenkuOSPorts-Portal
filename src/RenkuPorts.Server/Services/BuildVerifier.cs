@@ -75,6 +75,7 @@ public sealed class BuildVerifier(IServiceScopeFactory scopes, BlobContainerClie
                     var file = Path.Combine(work, $"{p.Id}.hpkg");
                     await blobs.GetBlobClient(p.BlobName).DownloadToAsync(file, ct);
                     var listing = await PackageDigest.ListAsync(indexer.Tools, file, p.FileName, dir, ct);
+                    if (listing.Raw) log.LogWarning("Job {Job}: {Package} is compared as raw bytes: {Reason}", job.Id, p.FileName, listing.RawReason);
                     (p.ListingJson, p.Digest) = (JsonSerializer.Serialize(listing, PackageDigest.Json), PackageDigest.Hash(listing));
                     File.Delete(file);
                     if (Directory.Exists(dir)) Directory.Delete(dir, true);

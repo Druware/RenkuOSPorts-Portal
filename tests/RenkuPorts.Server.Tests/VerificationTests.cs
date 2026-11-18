@@ -100,7 +100,7 @@ public partial class ApiTests
         Assert.Equal("Queued", second.Status); // not timestamp-like (sizes differ): no override, a third build
         var diff = Assert.Single(second.Builds[1].Diffs!);
         Assert.False(diff.GetProperty("timestampLike").GetBoolean());
-        Assert.Equal("size differs", diff.GetProperty("files")[0].GetProperty("note").GetString());
+        Assert.Matches("^compared as raw bytes: .+; size differs$", diff.GetProperty("files")[0].GetProperty("note").GetString()); // mock packages: no tools, or the tools reject them
 
         var done = await BuildOnceAsync(clients[2], name, good);
         Assert.Equal(("Succeeded", false), (done.Status, done.SelfVerified));
