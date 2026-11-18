@@ -1,0 +1,429 @@
+#!/bin/bash
+# RenkuPorts builder container entrypoint. Contract: docs/linux-mac-build-clients.md section A; usage in ../README.md.
+set -uo pipefail
+
+SHARE=/usr/share/renkuports
+CACHE=/cache
+OUT=/out
+TARGETS=(arm64 x86_64 x86)
+GUEST_TREE=/boot/home/RenkuOSPorts
+QMP=/run/qmp.sock
+KEY=$CACHE/ssh/id_ed25519
+SEED=/run/seed.img
+
+log() { echo "[host] $*"; }
+die() { # die <code> <message>
+	local code=$1; shift
+	echo "[host] error: $*" >&2
+	if [ "$code" = 3 ] && [ -n "${serial:-}" ] && [ -f "$serial" ]; then
+		echo "[host] last 100 lines of $serial:" >&2
+		tail -n 100 "$serial" >&2
+	fi
+	exit "$code"
+}
+usage() { die 2 "usage: renkuports-build build|mock <arch> <port> <version> | info [--json] | fetch-images [<arch>...] | gc"; }
+
+# Runs a command in the background and waits, so the TERM/INT trap fires immediately instead of after the command.
+run() { "$@" & child=$!; wait "$child"; local rc=$?; child=; return $rc; }
+
+# --- configuration -----------------------------------------------------------
+
+JOBS=${RENKUPORTS_JOBS:-4}
+GUEST_MB=${RENKUPORTS_GUEST_MB:-8192}
+ACCEL=${RENKUPORTS_ACCEL:-auto}
+GRACE=${RENKUPORTS_GRACE:-60}
+FRESH=${RENKUPORTS_FRESH:-0}
+MANIFEST=${RENKUPORTS_IMAGES_MANIFEST:-$SHARE/images.json}
+
+check_env() {
+	[[ $JOBS =~ ^[1-9][0-9]*$ ]] || die 2 "RENKUPORTS_JOBS must be a positive integer, got '$JOBS'"
+	[[ $GUEST_MB =~ ^[1-9][0-9]*$ ]] || die 2 "RENKUPORTS_GUEST_MB must be a positive integer, got '$GUEST_MB'"
+	[[ $GRACE =~ ^[0-9]+$ ]] || die 2 "RENKUPORTS_GRACE must be a number of seconds, got '$GRACE'"
+	[[ $ACCEL =~ ^(auto|kvm|tcg)$ ]] || die 2 "RENKUPORTS_ACCEL must be auto, kvm or tcg, got '$ACCEL'"
+	[[ $FRESH =~ ^[01]$ ]] || die 2 "RENKUPORTS_FRESH must be 0 or 1, got '$FRESH'"
+	# The URL is interpolated into a single-quoted guest command, and the character class has no quote.
+	local url_re="^https?://[A-Za-z0-9._~:/?#@!\$&()*+,;=%-]+\$"
+	[ -z "${RENKUPORTS_REPO_URL:-}" ] || [[ $RENKUPORTS_REPO_URL =~ $url_re ]] \
+		|| die 2 "RENKUPORTS_REPO_URL must be an http(s) URL without quotes, got '$RENKUPORTS_REPO_URL'"
+}
+
+# Validates <arch> and fails riscv64 with exit 3: no riscv64 guest can run HaikuPorter yet (spec G item 1).
+check_arch() {
+	[[ $1 =~ ^[a-z0-9_]+$ ]] || die 2 "invalid arch '$1'"
+	[ "$1" = riscv64 ] && die 3 "riscv64 is not supported yet: no riscv64 builder image can run HaikuPorter"
+	[[ " ${TARGETS[*]} " == *" $1 "* ]] || die 2 "unknown arch '$1' (targets: ${TARGETS[*]})"
+}
+
+check_job_args() {
+	[ $# -eq 3 ] || usage
+	check_arch "$1"
+	[[ $2 =~ ^[A-Za-z0-9._+-]+$ ]] || die 2 "invalid port '$2'"
+	[[ $3 =~ ^[A-Za-z0-9._+-]+$ ]] || die 2 "invalid version '$3'"
+	check_env
+}
+
+image_arch() { case $(uname -m) in aarch64|arm64) echo arm64 ;; x86_64) echo x86_64 ;; *) uname -m ;; esac; }
+
+# kvm when /dev/kvm is usable and the target runs natively on this host (i386 runs under x86_64 KVM).
+kvm_applies() {
+	local host; host=$(image_arch)
+	[ -r /dev/kvm ] && [ -w /dev/kvm ] && { [ "$1" = "$host" ] || { [ "$1" = x86 ] && [ "$host" = x86_64 ]; }; }
+}
+
+accel_for() {
+	case $ACCEL in
+		tcg) echo tcg ;;
+		kvm) kvm_applies "$1" && echo kvm || die 3 "RENKUPORTS_ACCEL=kvm but KVM is not available for $1 on this $(image_arch) host" ;;
+		*) kvm_applies "$1" && echo kvm || echo tcg ;;
+	esac
+}
+
+lock() {
+	mkdir -p "$CACHE" || die 3 "cannot create $CACHE"
+	exec 9> "$CACHE/build.lock" || die 3 "cannot open $CACHE/build.lock"
+	flock -n 9 || die 4 "cache volume busy: another build holds $CACHE/build.lock"
+}
+
+# --- guest images ------------------------------------------------------------
+
+# manifest <arch> <field>: prints the field, empty when absent; a broken manifest is exit 5.
+manifest() {
+	jq -er '.version == 1' "$MANIFEST" > /dev/null 2>&1 || die 5 "guest image manifest $MANIFEST is missing or not version 1"
+	jq -r --arg a "$1" --arg f "$2" '.images[$a][$f] // "" | tostring' "$MANIFEST" 2>/dev/null || die 5 "cannot parse $MANIFEST"
+}
+
+# The verified base is named after its diskSha256, so an overlay's backing file name tells which base it was made on.
+base_path() {
+	local sha; sha=$(manifest "$1" diskSha256)
+	[[ $sha =~ ^[0-9a-f]{64}$ ]] && echo "$CACHE/images/$1/disk-${sha:0:12}.qcow2"
+}
+
+image_cached() { local p; p=$(base_path "$1") && [ -f "$p" ]; }
+
+sha_ok() { [ "$(sha256sum < "$1" | cut -d' ' -f1)" = "$2" ]; }
+
+fetch_image() {
+	local arch=$1 url sha disksha base dir
+	url=$(manifest "$arch" url) sha=$(manifest "$arch" sha256) disksha=$(manifest "$arch" diskSha256)
+	if [ -z "$url" ] || ! [[ $sha =~ ^[0-9a-f]{64}$ && $disksha =~ ^[0-9a-f]{64}$ ]]; then
+		die 5 "no builder image published for $arch (run Prepare after the manifest has an image)"
+	fi
+	[ -n "${RENKUPORTS_IMAGE_BASE_URL:-}" ] && url="${RENKUPORTS_IMAGE_BASE_URL%/}/${url##*/}"
+	base=$(base_path "$arch") dir=$CACHE/images/$arch
+	if [ -f "$base" ]; then log "guest image for $arch is cached ($base)"; return 0; fi
+	mkdir -p "$dir" || die 3 "cannot create $dir"
+	log "downloading the $arch guest image from $url"
+	run curl -fL --retry 3 -C - -sS -o "$dir/disk.qcow2.xz.part" "$url" || { rm -f "$dir/disk.qcow2.xz.part"; die 5 "download of $url failed"; }
+	sha_ok "$dir/disk.qcow2.xz.part" "$sha" || { rm -f "$dir/disk.qcow2.xz.part"; die 5 "SHA-256 mismatch for $url"; }
+	log "decompressing"
+	run bash -c 'xz -dc "$1" > "$2"' _ "$dir/disk.qcow2.xz.part" "$base.tmp" || { rm -f "$base.tmp"; die 5 "cannot decompress $url"; }
+	rm -f "$dir/disk.qcow2.xz.part"
+	sha_ok "$base.tmp" "$disksha" || { rm -f "$base.tmp"; die 5 "SHA-256 mismatch of the decompressed $arch image"; }
+	chmod a-w "$base.tmp" && mv "$base.tmp" "$base" || die 3 "cannot store $base"
+	log "guest image for $arch verified ($base)"
+}
+
+# --- QEMU --------------------------------------------------------------------
+
+# Fills the array qemu with the command line for <arch> <kvm|tcg>; disk and vars live in $CACHE/work.
+qemu_argv() {
+	local arch=$1 accel=$2 mb=$GUEST_MB disk=$CACHE/work/$1.qcow2
+	local common=(-display none -monitor none -qmp "unix:$QMP,server,nowait" -serial "file:$CACHE/logs/$arch-serial.log"
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -smp "$JOBS")
+	local seed=(-drive "file=$SEED,format=raw,if=none,id=d1,readonly=on")
+	local pci=(-drive "file=$disk,format=qcow2,if=none,id=d0" -device virtio-blk-pci,drive=d0 "${seed[@]}" -device virtio-blk-pci,drive=d1
+		-device virtio-net-pci,netdev=n0)
+	case $arch in
+		x86_64)
+			qemu=(qemu-system-x86_64 -machine "q35,accel=$accel" -cpu "$([ "$accel" = kvm ] && echo host || echo max)" "${pci[@]}") ;;
+		x86)
+			# A 32-bit guest cannot use more than about 2 GiB of RAM.
+			[ "$mb" -gt 2048 ] && mb=2048
+			qemu=(qemu-system-i386 -machine "pc,accel=$accel" -cpu "$([ "$accel" = kvm ] && echo host || echo pentium3)" "${pci[@]}") ;;
+		arm64)
+			# The flags of renkuos/bootstrap/arm64/phase1b-run.sh; ramfb and the xhci keyboard let app_server start headless.
+			if [ "$accel" = kvm ]; then qemu=(qemu-system-aarch64 -M virt,gic-version=host,accel=kvm -cpu host)
+			else qemu=(qemu-system-aarch64 -M virt,gic-version=3,accel=tcg -cpu max); fi
+			qemu+=(-drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd
+				-drive "if=pflash,format=raw,file=$CACHE/work/arm64-vars.fd"
+				-drive "file=$disk,format=qcow2,if=none,id=d0" -device virtio-blk-device,drive=d0 "${seed[@]}" -device virtio-blk-device,drive=d1
+				-device virtio-net-device,netdev=n0 -device ramfb -device qemu-xhci -device usb-kbd) ;;
+		# riscv64, disabled until a riscv64 builder image exists (also needs qemu-system-misc and u-boot-qemu in the Dockerfile):
+		# riscv64)
+		# 	qemu=(qemu-system-riscv64 -M virt -cpu rv64 -kernel /usr/lib/u-boot/qemu-riscv64_smode/u-boot.bin
+		# 		-drive "file=$disk,format=qcow2,if=none,id=x0" -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+		# 		"${seed[@]}" -device virtio-blk-device,drive=d1 -device virtio-net-device,netdev=n0 -device usb-ehci -device usb-tablet -device usb-kbd -device ati-vga) ;;
+	esac
+	qemu+=("${common[@]}" -m "$mb")
+}
+
+# One key pair per cache volume; the guest gets the public key from the seed disk on every boot.
+ensure_key() {
+	[ -f "$KEY" ] && return 0
+	mkdir -p -m 700 "${KEY%/*}" && ssh-keygen -q -t ed25519 -N '' -C renkuports-guest -f "$KEY" && chmod 600 "$KEY" \
+		|| die 3 "cannot create the guest ssh key $KEY"
+	log "created the guest ssh key $KEY.pub"
+}
+
+# A FAT image labelled RENKUSEED holding authorized_keys; the guest's boot script installs it.
+make_seed() {
+	rm -f "$SEED"
+	mkfs.vfat -C -n RENKUSEED "$SEED" 1440 > /dev/null && mcopy -i "$SEED" "$KEY.pub" ::authorized_keys \
+		|| die 3 "cannot create the seed disk $SEED"
+}
+
+# The guest is only reachable on this container's loopback, so its host key is not checked.
+SSH=(ssh -i "$KEY" -p 2222 -o BatchMode=yes -o ConnectTimeout=5 -o LogLevel=ERROR
+	-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 user@127.0.0.1)
+ssh_g() { "${SSH[@]}" "$@"; }
+
+qmp() { printf '{"execute":"qmp_capabilities"}\n{"execute":"%s"}\n' "$1" | timeout 5 socat - "UNIX-CONNECT:$QMP" > /dev/null 2>&1; }
+
+qemu_running() { [ -n "${qemu_pid:-}" ] && kill -0 "$qemu_pid" 2> /dev/null; }
+
+# Waits for QEMU to exit until the absolute $SECONDS deadline; true if it exited.
+qemu_wait_until() { while qemu_running && [ "$SECONDS" -lt "$1" ]; do sleep 1; done; ! qemu_running; }
+
+# ssh shutdown, then QMP system_powerdown, then QMP quit once RENKUPORTS_GRACE has passed.
+guest_poweroff() {
+	qemu_running || return 0
+	local deadline=$((SECONDS + GRACE))
+	log "shutting the guest down"
+	timeout 10 "${SSH[@]}" shutdown > /dev/null 2>&1
+	qemu_wait_until $((SECONDS + 20 < deadline ? SECONDS + 20 : deadline)) && return 0
+	qmp system_powerdown
+	qemu_wait_until "$deadline" && return 0
+	log "guest did not power off within ${GRACE}s, stopping QEMU"
+	qmp quit
+	qemu_wait_until $((SECONDS + 5)) || kill -9 "$qemu_pid" 2> /dev/null
+	wait "$qemu_pid" 2> /dev/null
+}
+
+on_signal() {
+	trap '' TERM INT
+	log "interrupted"
+	[ -n "${child:-}" ] && kill "$child" 2> /dev/null
+	guest_poweroff
+	exit 75
+}
+
+# --- ports tree --------------------------------------------------------------
+
+update_ports() {
+	local url=${RENKUPORTS_PORTS_URL:-} ref=${RENKUPORTS_PORTS_REF:-main} p=$CACHE/ports
+	if [ -d "$p/.git" ]; then
+		[ -n "$url" ] && git -C "$p" remote set-url origin "$url"
+		if run git -C "$p" fetch -q --depth 1 origin "$ref" && git -C "$p" reset -q --hard FETCH_HEAD; then :
+		else log "warning: cannot update the ports tree to $ref, building the tree as it is"; fi
+	else
+		[ -n "$url" ] || die 2 "RENKUPORTS_PORTS_URL is required: $p has no clone"
+		rm -rf "$p"
+		log "cloning $url ($ref)"
+		if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+			git init -q "$p" && git -C "$p" remote add origin "$url" && run git -C "$p" fetch -q --depth 1 origin "$ref" \
+				&& git -C "$p" reset -q --hard FETCH_HEAD
+		else
+			run git clone -q --depth 1 --branch "$ref" "$url" "$p"
+		fi || { rm -rf "$p"; die 3 "cannot clone $url ($ref)"; }
+	fi
+	log "ports tree at commit $(git -C "$p" rev-parse HEAD)"
+}
+
+check_recipe() {
+	local p=$CACHE/ports
+	if [ -n "${RENKUPORTS_RECIPE_PATH:-}" ]; then
+		[ -f "$p/$RENKUPORTS_RECIPE_PATH" ] || log "warning: recipe $RENKUPORTS_RECIPE_PATH is not in the ports tree"
+	elif [ -z "$(find "$p" -name "$1-$2.recipe" -not -path '*/.git/*' -print -quit)" ]; then
+		log "warning: no $1-$2.recipe in the ports tree"
+	fi
+}
+
+# Sends the tree to the guest; after the first time only changed files, so unchanged files keep their mtimes.
+ship_tree() {
+	local p=$CACHE/ports head old
+	head=$(git -C "$p" rev-parse HEAD)
+	old=$(ssh_g "cat /boot/home/tree.commit 2> /dev/null")
+	if [ "$old" = "$head" ]; then log "guest tree is already at $head"
+	elif [ -n "$old" ] && git -C "$p" cat-file -e "$old^{commit}" 2> /dev/null; then
+		log "sending changes $old..$head to the guest"
+		git -C "$p" diff -z --name-only --no-renames --diff-filter=D "$old" HEAD \
+			| ssh_g "cd $GUEST_TREE && xargs -0 rm -f" || die 3 "cannot remove deleted files in the guest"
+		git -C "$p" diff -z --name-only --no-renames --diff-filter=d "$old" HEAD | tar -c -C "$p" --null -T - \
+			| ssh_g "tar -x -C $GUEST_TREE" || die 3 "cannot send the tree to the guest"
+	else
+		# shortcut: a full send over an existing guest tree leaves files deleted since then; use RENKUPORTS_FRESH=1 if that matters.
+		log "sending the whole tree at $head to the guest"
+		git -C "$p" archive HEAD | ssh_g "mkdir -p $GUEST_TREE && tar -x -C $GUEST_TREE" || die 3 "cannot send the tree to the guest"
+	fi
+	echo "$head" | ssh_g "cat > /boot/home/tree.commit" || die 3 "cannot record the tree commit in the guest"
+}
+
+# Prints "<mtime> <name>" of the guest's packages, one per line.
+guest_packages() { ssh_g "cd $GUEST_TREE/packages 2> /dev/null && for f in *.hpkg; do [ -f \"\$f\" ] && stat -c '%Y %n' \"\$f\"; done; true"; }
+
+# --- subcommands -------------------------------------------------------------
+
+cmd_info() {
+	local json=0 a acc= img= info
+	case ${1:-} in --json) json=1 ;; "") ;; *) usage ;; esac
+	[ $# -le 1 ] || usage
+	for a in "${TARGETS[@]}"; do
+		acc+="\"$a\":\"$(ACCEL=auto accel_for "$a")\","
+		img+="\"$a\":\"$(image_cached "$a" && echo cached || echo missing)\","
+	done
+	info=$(jq -nc --arg v "$(cat "$SHARE/version")" --arg h "$(image_arch)" --argjson acc "{${acc%,}}" --argjson img "{${img%,}}" \
+		'{version: $v, imageArch: $h, targets: ($acc | keys_unsorted),
+		  unsupported: {riscv64: "no riscv64 builder image can run HaikuPorter yet"}, accel: $acc, guestImages: $img}') \
+		|| die 3 "cannot build the info JSON"
+	if [ $json = 1 ]; then echo "$info"
+	else jq -r '"version \(.version), image arch \(.imageArch)",
+		(.targets[] as $a | "\($a): accel \(.accel[$a]), guest image \(.guestImages[$a])"),
+		(.unsupported | to_entries[] | "\(.key): unsupported (\(.value))")' <<< "$info"; fi
+}
+
+cmd_fetch_images() {
+	local a archs=("$@")
+	[ $# -gt 0 ] || archs=("${TARGETS[@]}")
+	for a in "${archs[@]}"; do check_arch "$a"; done
+	lock
+	for a in "${archs[@]}"; do fetch_image "$a"; done
+}
+
+cmd_gc() {
+	[ $# -eq 0 ] || usage
+	lock
+	log "removing work overlays and images not in the manifest"
+	rm -f "$CACHE"/work/* "$CACHE"/images/*/*.part "$CACHE"/images/*/*.tmp
+	local f keep a
+	for a in "${TARGETS[@]}"; do
+		keep=$(base_path "$a")
+		for f in "$CACHE/images/$a"/disk-*.qcow2; do [ -f "$f" ] && [ "$f" != "$keep" ] && rm -f "$f" && log "removed $f"; done
+	done
+	return 0
+}
+
+# Same contract as build, without QEMU: the fake hpkg is byte-identical to client/scripts/mock-build.sh's.
+cmd_mock() {
+	check_job_args "$@"
+	local arch=$1 port=$2 version=$3 accel
+	accel=$(accel_for "$arch") || exit $?
+	lock
+	log "mock build of $port $version for $arch (job ${RENKUPORTS_JOB_ID:-none}, accel $accel)"
+	[ -n "${RENKUPORTS_MOCK_SLEEP:-}" ] && { run sleep "$RENKUPORTS_MOCK_SLEEP" || die 3 "mock sleep failed"; }
+	case $port in
+		infra*) die 3 "mock infrastructure failure for $port" ;;
+		badimage*) die 5 "mock guest image failure for $port" ;;
+	esac
+	if [[ $port == fail* || $port == "${RENKUPORTS_MOCK_FAIL:-}" ]]; then
+		echo "error: mock failure for $port" >&2
+		exit 1
+	fi
+	{
+		printf 'mock hpkg\nport=%s\nversion=%s\narch=%s\n' "$port" "$version" "$arch"
+		[ -z "${MOCK_TIMESTAMP:-}" ] || printf 'built=%s\n' "$(LC_ALL=C date -u '+%b %e %Y %H:%M:%S')"
+		[ -z "${MOCK_VARIANT:-}" ] || printf 'variant=%s\n' "$MOCK_VARIANT"
+	} > "$OUT/$port-$version-1-$arch.hpkg" || die 3 "cannot write to $OUT"
+	log "wrote $OUT/$port-$version-1-$arch.hpkg"
+}
+
+cmd_build() {
+	check_job_args "$@"
+	local arch=$1 port=$2 version=$3 accel base overlay=$CACHE/work/$1.qcow2 rc f
+	log "job ${RENKUPORTS_JOB_ID:-none}: $port $version for $arch (platform ${RENKUPORTS_PLATFORM:-unset})"
+	accel=$(accel_for "$arch") || exit $?
+	lock
+	ensure_key
+	fetch_image "$arch"
+	base=$(base_path "$arch")
+	mkdir -p "$CACHE/work" "$CACHE/logs" || die 3 "cannot create $CACHE/work"
+
+	# A missing, foreign-based or (after a killed QEMU) damaged overlay is recreated; the base is never written.
+	if [ -f "$overlay" ]; then
+		if [ "$FRESH" = 1 ]; then log "RENKUPORTS_FRESH=1: discarding the $arch work overlay"; rm -f "$overlay"
+		elif [ "$(qemu-img info --output=json "$overlay" 2> /dev/null | jq -r '."backing-filename" // ""')" != "$base" ]; then
+			log "the $arch base image changed: discarding the work overlay"; rm -f "$overlay"
+		elif ! qemu-img check -q "$overlay" > /dev/null 2>&1; then
+			log "warning: the $arch work overlay is damaged, discarding it"; rm -f "$overlay"
+		fi
+	fi
+	if [ ! -f "$overlay" ]; then
+		rm -f "$CACHE/work/$arch-vars.fd"
+		qemu-img create -q -f qcow2 -F qcow2 -b "$base" "$overlay" || die 3 "cannot create $overlay"
+	fi
+	if [ "$arch" = arm64 ] && [ ! -f "$CACHE/work/arm64-vars.fd" ]; then
+		cp /usr/share/AAVMF/AAVMF_VARS.fd "$CACHE/work/arm64-vars.fd" || die 3 "cannot create the UEFI vars file"
+	fi
+
+	update_ports
+	check_recipe "$port" "$version"
+
+	make_seed
+	qemu_argv "$arch" "$accel"
+	serial=$CACHE/logs/$arch-serial.log
+	: > "$serial"
+	log "booting the $arch guest ($accel): ${qemu[*]}"
+	"${qemu[@]}" & qemu_pid=$!
+	local limit=3600
+	[ "$accel" = kvm ] && limit=600
+	local deadline=$((SECONDS + limit))
+	until ssh_g true 2> /dev/null; do
+		qemu_running || die 3 "QEMU exited during boot"
+		[ "$SECONDS" -lt "$deadline" ] || { guest_poweroff; die 3 "no ssh from the guest after ${limit}s"; }
+		run sleep 5
+	done
+	log "guest is up"
+
+	# arm64 has no RTC driver and boots at 1970, which makes configure and make loop; set the clock on every arch.
+	ssh_g "date -s @$(date +%s)" > /dev/null || log "warning: cannot set the guest clock"
+	ship_tree
+	local harch=$arch
+	[ "$arch" = x86 ] && harch=x86_gcc2
+	printf 'TREE_PATH="%s"\nTARGET_ARCHITECTURE="%s"\nPACKAGER="RenkuPorts Builder <noreply@renkuos.org>"\n' "$GUEST_TREE" "$harch" \
+		| ssh_g "cat > ~/config/settings/haikuports.conf" || die 3 "cannot write haikuports.conf in the guest"
+	if [ -n "${RENKUPORTS_REPO_URL:-}" ]; then
+		if ssh_g "pkgman list-repos" 2> /dev/null | grep -qF -- "$RENKUPORTS_REPO_URL"; then :
+		else ssh_g "pkgman add-repo '$RENKUPORTS_REPO_URL'" || log "warning: cannot add the package repository $RENKUPORTS_REPO_URL"; fi
+	fi
+
+	local before after new=()
+	before=$(guest_packages) || die 3 "cannot list the guest's packages"
+	run ssh_g "haikuporter --config=\$HOME/config/settings/haikuports.conf -y --no-source-packages --no-git-repo --get-dependencies -j$JOBS $port-$version"
+	rc=$?
+	[ $rc = 255 ] && die 3 "ssh to the guest failed during the build"
+	after=$(guest_packages) || die 3 "cannot list the guest's packages"
+	# Added or rewritten packages, as Worker.cpp; if none, the port's own packages (HaikuPorter skipped an existing build).
+	while read -r _ f; do [[ $f == *-source.hpkg ]] || new+=("$f"); done < <(comm -13 <(sort <<< "$before") <(sort <<< "$after"))
+	if [ $rc = 0 ] && [ ${#new[@]} = 0 ]; then
+		while read -r _ f; do
+			[[ $f == "$port-$version-"* || ($f == "${port}_"* && $f == *"-$version-"*) ]] && [[ $f != *-source.hpkg ]] && new+=("$f")
+		done <<< "$after"
+	fi
+	for f in "${new[@]}"; do [[ $f =~ ^[A-Za-z0-9._+-]+\.hpkg$ ]] || die 3 "unexpected package name from the guest: '$f'"; done
+	if [ ${#new[@]} -gt 0 ]; then
+		log "copying ${new[*]} to $OUT"
+		ssh_g "cd $GUEST_TREE/packages && tar -c ${new[*]}" | tar -x -C "$OUT" --no-same-owner || die 3 "cannot copy the packages from the guest"
+		for f in "${new[@]}"; do [ -s "$OUT/$f" ] || die 3 "$OUT/$f is empty"; done
+	fi
+	guest_poweroff
+	[ $rc = 0 ] || die 1 "haikuporter exited with $rc"
+	[ ${#new[@]} -gt 0 ] || die 1 "haikuporter succeeded but produced no package for $port-$version"
+	log "built ${#new[@]} package(s)"
+}
+
+trap on_signal TERM INT
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+	build) cmd_build "$@" ;;
+	mock) cmd_mock "$@" ;;
+	info) cmd_info "$@" ;;
+	fetch-images) cmd_fetch_images "$@" ;;
+	gc) cmd_gc "$@" ;;
+	# Testing aid: prints the QEMU argv for <arch> <kvm|tcg>, one argument per line, without checking /dev/kvm.
+	qemu-argv)
+		[ $# -eq 2 ] && [[ $2 =~ ^(kvm|tcg)$ ]] || usage
+		check_arch "$1"; check_env
+		qemu_argv "$1" "$2"; printf '%s\n' "${qemu[@]}" ;;
+	*) usage ;;
+esac

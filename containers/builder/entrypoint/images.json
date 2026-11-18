@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "images": {
+    "arm64": { "url": "", "sha256": "", "diskSha256": "", "bytes": 0, "haikuRev": "" },
+    "x86_64": { "url": "", "sha256": "", "diskSha256": "", "bytes": 0, "haikuRev": "" },
+    "x86": { "url": "", "sha256": "", "diskSha256": "", "bytes": 0, "haikuRev": "" }
+  }
+}
