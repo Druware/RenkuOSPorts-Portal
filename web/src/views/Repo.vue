@@ -76,26 +76,25 @@ const fileHref = (f) => `/repo/${platform.value}/packages/${encodeURIComponent(f
           <tr>
             <th scope="col">File</th>
             <th scope="col" class="num">Size</th>
-            <th scope="col">Built</th>
-            <th scope="col">Uploaded</th>
-            <th scope="col">Recipe updated</th>
-            <th scope="col">Built by</th>
             <th scope="col">SHA-256</th>
           </tr>
         </thead>
-        <tbody>
-          <tr v-for="p in packages" :key="p.fileName">
+        <!-- One tbody per package: file, size and SHA on line 1; the details, indented, on line 2. -->
+        <tbody v-for="p in packages" :key="p.fileName" class="pkg">
+          <tr>
             <td class="col-file"><a :href="fileHref(p.fileName)" download>{{ p.fileName }}</a></td>
             <td class="num nowrap">{{ formatBytes(p.size) }}</td>
-            <td class="nowrap">{{ formatDate(p.buildDate) }}</td>
-            <td class="nowrap">{{ formatDate(p.uploadedAt) }}</td>
-            <td class="nowrap">{{ formatDate(p.recipeUpdatedAt) }}</td>
-            <td>{{ p.builtBy || '—' }}</td>
             <td class="nowrap"><code :title="p.sha256">{{ p.sha256?.slice(0, 12) }}…</code> <CopyButton :text="p.sha256" label="Copy" /></td>
           </tr>
-          <tr v-if="!loading && !packages.length && !error">
-            <td colspan="7" class="muted">No packages{{ search ? ' match your search' : ' yet' }}.</td>
+          <tr class="details muted small">
+            <td colspan="3">
+              Built {{ formatDate(p.buildDate) }} · Uploaded {{ formatDate(p.uploadedAt) }} ·
+              Recipe updated {{ formatDate(p.recipeUpdatedAt) }} · Built by {{ p.builtBy || '—' }}
+            </td>
           </tr>
+        </tbody>
+        <tbody v-if="!loading && !packages.length && !error">
+          <tr><td colspan="3" class="muted">No packages{{ search ? ' match your search' : ' yet' }}.</td></tr>
         </tbody>
       </table>
     </div>

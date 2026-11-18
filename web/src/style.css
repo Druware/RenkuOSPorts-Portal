@@ -166,6 +166,11 @@ thead th { font-family: var(--font-head); font-weight: 600; color: hsl(var(--mut
 tbody tr:hover { background: hsla(0, 0%, 100%, .03); }
 tr.selected { background: hsl(var(--muted)); }
 td a { overflow-wrap: anywhere; }
+/* Two-line package rows (Repo.vue): line 1 has no rule under it, line 2 is indented. */
+tbody.pkg tr:first-child td { border-bottom: 0; padding-bottom: .1rem; }
+tbody.pkg tr.details td { padding: 0 .6rem .5rem 1.6rem; }
+tbody.pkg:hover { background: hsla(0, 0%, 100%, .03); }
+tbody.pkg tr:hover { background: none; }
 .col-file { min-width: 14rem; }
 
 .platform-switch { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.25rem; }
