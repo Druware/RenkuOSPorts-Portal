@@ -1,7 +1,7 @@
 import Foundation
 
 /// The app version; keep it in step with the Haiku client's APP_VERSION and the git tag.
-public let appVersion = "0.1.1"
+public let appVersion = "0.1.2"
 
 /// Settings, stored as key=value lines (mode 0600) in `~/Library/Application Support/RenkuPortsBuilder/settings`.
 /// The secret is not in the file: it lives in the login Keychain (see ``Keychain``).

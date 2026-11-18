@@ -11,7 +11,7 @@
 #include <libsoup/soup.h>
 
 #ifndef APP_VERSION
-#define APP_VERSION "0.1.1"
+#define APP_VERSION "0.1.2"
 #endif
 /** shortcut: the registry is still an open question (spec G 10); GHCR under the repository owner is assumed. */
 #define DEFAULT_IMAGE "ghcr.io/druware/renkuports-builder:" APP_VERSION

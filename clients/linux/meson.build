@@ -1,4 +1,4 @@
-project('renkuports-builder', 'c', version: '0.1.1', license: 'MIT', meson_version: '>= 0.60',
+project('renkuports-builder', 'c', version: '0.1.2', license: 'MIT', meson_version: '>= 0.60',
   default_options: ['c_std=gnu11', 'warning_level=2'])
 
 add_project_arguments('-DAPP_VERSION="@0@"'.format(meson.project_version()), language: 'c')
