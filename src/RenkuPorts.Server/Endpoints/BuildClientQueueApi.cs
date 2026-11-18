@@ -38,7 +38,7 @@ public static partial class BuildClientApi
 
     private static void MapQueueViews(RouteGroupBuilder api, RouteGroupBuilder jobs)
     {
-        // Default: every platform, Queued and InProgress. scope=mine: claimed by this client; scope=owner: by any client of its owner.
+        // Default: every platform, the active jobs (queued, building, verifying, awaiting an override). scope=mine: claimed by this client; scope=owner: by any client of its owner.
         jobs.MapGet("", async (string? status, string? platform, string? scope, int? page, int? pageSize, HttpContext http, AppDbContext db) =>
         {
             var client = (BuildClient)http.Items[ClientItem]!;
@@ -47,7 +47,7 @@ public static partial class BuildClientApi
                 if (Enum.TryParse<JobStatus>(status, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)) want = parsed;
                 else return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = [$"One of: {string.Join(", ", Enum.GetNames<JobStatus>())}."] });
             var q = db.Jobs.AsQueryable();
-            q = want is null ? q.Where(j => j.Status == JobStatus.Queued || j.Status == JobStatus.InProgress) : q.Where(j => j.Status == want);
+            q = want is null ? q.Where(j => JobStatuses.Active.Contains(j.Status)) : q.Where(j => j.Status == want);
             if (!string.IsNullOrEmpty(platform)) q = q.Where(j => j.Platform == platform);
             switch (scope)
             {
@@ -57,7 +57,7 @@ public static partial class BuildClientApi
                 default: return Results.ValidationProblem(new Dictionary<string, string[]> { ["scope"] = ["all, mine or owner."] });
             }
             // The live queue reads in claim order; finished jobs newest first, like the admin list.
-            var live = want is null or JobStatus.Queued or JobStatus.InProgress;
+            var live = want is null || JobStatuses.Active.Contains(want.Value);
             var result = await Paged<ClientJobDto>.FromAsync(WithQueueInfo(db, q, client.Platform),
                 o => live ? o.OrderByDescending(x => x.Priority).ThenBy(x => x.Job.QueuedAt).ThenBy(x => x.Job.Id) : o.OrderByDescending(x => x.Job.Id),
                 ToClientJob(client), page, pageSize);
@@ -98,7 +98,7 @@ public static partial class BuildClientApi
         return x => new ClientJobDto(x.Job.Id, x.Job.Recipe!.PortName, x.Job.Recipe.Version, x.Job.Platform, x.Job.Status, x.Job.QueuedAt,
             x.Job.ClaimedAt, x.Job.LeaseExpiresAt, x.Job.CompletedAt, x.Job.Attempts, x.Priority, x.Job.ClaimedBy == null ? null : x.Job.ClaimedBy.Name,
             x.Job.ClaimedByClientId == id, x.Job.ClaimedByClientId != id && x.Job.ClaimedBy != null && x.Job.ClaimedBy.OwnerId == ownerId,
-            x.Position, x.Job.FailureSummary, new List<string>(), 0, false, false, null);
+            x.Position, x.Job.FailureSummary, new List<string>(), 0, false, false, null, x.Job.SelfVerified);
     }
 
     /// <summary>Most ports listed in <see cref="ClientJobDto.WaitingOn"/>.</summary>
@@ -149,7 +149,7 @@ public static partial class BuildClientApi
         {
             var g = new DependencyGraph();
             foreach (var p in platforms) g._edges[p] = await EdgesAsync(db, p);
-            var active = await db.Jobs.Where(j => platforms.Contains(j.Platform) && (j.Status == JobStatus.Queued || j.Status == JobStatus.InProgress))
+            var active = await db.Jobs.Where(j => platforms.Contains(j.Platform) && JobStatuses.Active.Contains(j.Status))
                 .GroupBy(j => new { j.Platform, j.Recipe!.PortName })
                 .Select(x => new { x.Key.Platform, x.Key.PortName, Queued = x.Count(j => j.Status == JobStatus.Queued) }).ToListAsync();
             foreach (var a in active) g._queued[(a.Platform, a.PortName)] = a.Queued;
@@ -172,7 +172,7 @@ public static partial class BuildClientApi
             return Cache[platform] = edges;
         }
 
-        /// <summary>Has a Queued or InProgress job on the platform.</summary>
+        /// <summary>Has an active (not finished) job on the platform.</summary>
         public bool Active(string platform, string port) => _queued.ContainsKey((platform, port));
 
         /// <summary>Queued jobs of the port on the platform.</summary>

@@ -50,6 +50,36 @@ async function jobAction(job, action) {
   } catch (e) { fail(e) }
 }
 
+// ---- Build verification: approve a timestamp-only mismatch, clear a port's embeds-dates flag ----
+const approveForms = reactive({}) // job id -> { buildId, reason, embedsDates }
+function approveForm(j) {
+  return (approveForms[j.id] ??= { buildId: j.builds.filter((b) => b.status === 'Completed').at(-1)?.id, reason: '', embedsDates: false })
+}
+/** The job's builds differ only in timestamp-like bytes (the server offers no override otherwise). */
+const timestampOnly = (j) => j.status === 'AwaitingOverride' && j.builds.some((b) => b.diffs?.some((d) => d.timestampLike))
+const duration = (b) => (b.completedAt ? `${Math.round((new Date(b.completedAt) - new Date(b.claimedAt)) / 60000)} min` : '')
+function matchState(j, b) {
+  if (b.status !== 'Completed' || !b.digest) return ''
+  if (j.approvedBuildId === b.id) return 'approved'
+  return j.builds.some((o) => o.id !== b.id && o.status === 'Completed' && o.digest === b.digest) ? 'matches' : 'differs'
+}
+async function approve(j) {
+  const f = approveForm(j)
+  try {
+    await api(`/jobs/${j.id}/approve`, { method: 'POST', body: f })
+    ok(`${j.portName} (${j.platform}): build approved and published.`)
+    delete approveForms[j.id]
+    await Promise.all([loadDashboard(), loadJobs()])
+  } catch (e) { fail(e) }
+}
+async function clearEmbedsDates(r) {
+  try {
+    await api(`/ports/${encodeURIComponent(r.portName)}/embeds-dates`, { method: 'DELETE' })
+    ok(`${r.portName}: timestamp-only mismatches need an admin again.`)
+    await loadRecipes()
+  } catch (e) { fail(e) }
+}
+
 // ---- Recipes ----
 const recipeSearch = ref('')
 const recipes = ref({ items: [], total: 0, page: 1, pageSize: 50 })
@@ -245,17 +275,18 @@ watch(tab, (t) => {
     <HaikuWindow title="Build status">
       <div class="table-wrap">
         <table>
-          <thead><tr><th scope="col">Platform</th><th scope="col" class="num">Queued</th><th scope="col" class="num">In progress</th><th scope="col" class="num">Succeeded</th><th scope="col" class="num">Failed</th></tr></thead>
+          <thead><tr><th scope="col">Platform</th><th scope="col" class="num">Queued</th><th scope="col" class="num">In progress</th><th scope="col" class="num">Verifying</th><th scope="col" class="num">Awaiting override</th><th scope="col" class="num">Succeeded</th><th scope="col" class="num">Failed</th></tr></thead>
           <tbody>
             <tr v-for="c in dash?.counts || []" :key="c.platform">
               <th scope="row">{{ c.platform }}</th>
-              <td class="num">{{ c.queued }}</td><td class="num">{{ c.inProgress }}</td><td class="num">{{ c.succeeded }}</td>
+              <td class="num">{{ c.queued }}</td><td class="num">{{ c.inProgress }}</td><td class="num">{{ c.verifying }}</td>
+              <td class="num" :class="{ 'text-danger': c.awaitingOverride }">{{ c.awaitingOverride }}</td><td class="num">{{ c.succeeded }}</td>
               <td class="num" :class="{ 'text-danger': c.failed }">{{ c.failed }}</td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p class="muted small">Refreshes every 15 seconds.</p>
+      <p class="muted small">Every build is built twice, by different clients where possible, and published only when both have the same contents. Jobs awaiting an override are on the Jobs tab. Refreshes every 15 seconds.</p>
     </HaikuWindow>
 
     <HaikuWindow title="Recent failures">
@@ -330,8 +361,10 @@ watch(tab, (t) => {
           <strong>{{ j.portName }}-{{ j.version }}</strong>
           <span class="pill">{{ j.platform }}</span>
           <StatusBadge :status="j.status" />
+          <span v-if="j.selfVerified" class="badge badge-self" title="Both matching builds came from the same build client">Self-verified</span>
+          <span v-if="j.approval === 'Override'" class="badge badge-self" :title="`Approved by ${j.approvedBy}: ${j.approvalReason}`">Overridden</span>
           <span class="row-actions">
-            <button v-if="j.status === 'Queued'" type="button" class="btn btn-small btn-danger" :aria-label="`Cancel ${j.portName}-${j.version} (${j.platform})`" @click="jobAction(j, 'cancel')">Cancel</button>
+            <button v-if="j.status === 'Queued' || j.status === 'AwaitingOverride'" type="button" class="btn btn-small btn-danger" :aria-label="`Cancel ${j.portName}-${j.version} (${j.platform})`" @click="jobAction(j, 'cancel')">Cancel</button>
             <button v-if="j.status === 'Failed' || j.status === 'Cancelled'" type="button" class="btn btn-small" :aria-label="`Requeue ${j.portName}-${j.version} (${j.platform})`" @click="jobAction(j, 'requeue')">Requeue</button>
           </span>
         </div>
@@ -339,6 +372,37 @@ watch(tab, (t) => {
           Queued {{ formatDate(j.queuedAt) }} by {{ j.queuedBy }} · Client {{ j.claimedBy || '—' }} ·
           Completed {{ formatDate(j.completedAt) }} · Attempts {{ j.attempts }}
           <p v-if="j.failureSummary" class="summary">{{ j.failureSummary }}</p>
+          <p v-if="j.approval">Approved {{ formatDate(j.approvedAt) }} ({{ j.approval === 'Match' ? 'builds match' : j.approval === 'EmbedsDates' ? 'automatic: the port embeds dates' : `override by ${j.approvedBy}` }})<span v-if="j.approvalReason">: {{ j.approvalReason }}</span></p>
+          <ul v-if="j.builds?.length" class="builds">
+            <li v-for="b in j.builds" :key="b.id">
+              Build {{ b.number }}: {{ b.clientName }} · <StatusBadge :status="b.status" /> {{ duration(b) }}
+              <template v-if="b.digest"> · digest <code :title="b.digest">{{ b.digest.slice(0, 12) }}</code> <strong>{{ matchState(j, b) }}</strong></template>
+              <span v-if="b.packages.some((p) => p.extra)"> · extra, not published: <code v-for="p in b.packages.filter((p) => p.extra)" :key="p.fileName">{{ p.fileName }} </code></span>
+              <details v-for="d in b.diffs || []" :key="d.againstBuild">
+                <summary>Differs from build {{ d.againstBuild }} in {{ d.fileCount }} file(s){{ d.timestampLike ? ' — only timestamp-like bytes' : '' }}</summary>
+                <ul>
+                  <li v-for="f in d.files" :key="f.package + f.path">
+                    <code>{{ f.package }}{{ f.path ? ` : ${f.path}` : '' }}</code> {{ f.sizeA ?? '—' }} / {{ f.sizeB ?? '—' }} bytes
+                    <span v-if="f.note"> · {{ f.note }}</span><span v-else> · {{ f.runCount }} differing run(s){{ f.timestampLike ? ', timestamp-like' : '' }}</span>
+                    <div v-for="run in f.runs" :key="run.offset" class="diff-runs">@{{ run.offset }}: <span>{{ run.a }}</span> → <span>{{ run.b }}</span></div>
+                  </li>
+                  <li v-if="d.fileCount > d.files.length" class="muted">{{ d.fileCount - d.files.length }} more not shown</li>
+                </ul>
+              </details>
+            </li>
+          </ul>
+          <form v-if="timestampOnly(j)" class="form" @submit.prevent="approve(j)">
+            <fieldset>
+              <legend>Approve anyway: the builds differ only in what looks like embedded dates or times</legend>
+              <label v-for="b in j.builds.filter((b) => b.status === 'Completed')" :key="b.id" class="check">
+                <input v-model="approveForm(j).buildId" type="radio" :name="`ap-${j.id}`" :value="b.id" /> Publish build {{ b.number }} ({{ b.clientName }})
+              </label>
+            </fieldset>
+            <label :for="`ap-reason-${j.id}`">Reason (required)</label>
+            <input :id="`ap-reason-${j.id}`" v-model.trim="approveForm(j).reason" type="text" required maxlength="1000" autocomplete="off" />
+            <label class="check"><input v-model="approveForm(j).embedsDates" type="checkbox" /> This port embeds dates: approve its future timestamp-only differences automatically</label>
+            <button class="btn btn-primary" type="submit" :disabled="!approveForm(j).reason || !approveForm(j).buildId">Approve anyway</button>
+          </form>
           <div v-if="j.packages?.length > 3">
             <details><summary>{{ j.packages.length }} packages</summary><ul class="pkg-names"><li v-for="n in j.packages" :key="n"><code>{{ n }}</code></li></ul></details>
           </div>
@@ -369,6 +433,7 @@ watch(tab, (t) => {
           <span class="row-file">{{ p.fileName }}</span>
           <span class="nowrap">{{ formatBytes(p.size) }}</span>
           <span class="nowrap"><code :title="p.sha256">{{ p.sha256?.slice(0, 12) }}…</code> <CopyButton :text="p.sha256" label="Copy" /></span>
+          <span v-if="p.verification === 'self-verified'" class="badge badge-self" title="Both matching builds came from the same build client">Self-verified</span>
           <span class="row-actions"><button type="button" class="btn btn-small btn-danger" :aria-label="`Delete ${p.fileName}`" @click="deletePackage(p)">Delete</button></span>
         </div>
         <div class="row-details muted small">
@@ -515,7 +580,7 @@ watch(tab, (t) => {
       </div>
       <div class="table-wrap">
         <table :class="{ loading: recipesLoading }" :aria-busy="recipesLoading">
-          <thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Port</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Recipe updated</th><th scope="col" class="num">Priority</th><th scope="col" class="num">Dependents</th></tr></thead>
+          <thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Port</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Recipe updated</th><th scope="col" class="num">Priority</th><th scope="col" class="num">Dependents</th><th scope="col">Embeds dates</th></tr></thead>
           <tbody>
             <tr v-for="r in recipes.items" :key="r.id" :class="{ selected: selected?.id === r.id }">
               <td><input type="radio" name="recipe" :id="`rc-${r.id}`" :checked="selected?.id === r.id" @change="selected = r" /></td>
@@ -523,8 +588,9 @@ watch(tab, (t) => {
               <td>{{ r.version }}</td><td>{{ r.category }}</td><td class="nowrap">{{ formatDate(r.recipeUpdatedAt) }}</td>
               <td class="num" :class="{ muted: r.outstanding === false }" :title="r.outstanding === false ? 'Not outstanding: published already, or not stable on this platform' : ''">{{ r.priority ?? '—' }}</td>
               <td class="num">{{ r.dependents ?? '—' }}</td>
+              <td><button v-if="r.embedsDates" type="button" class="btn btn-small" :aria-label="`Clear the embeds-dates flag of ${r.portName}`" title="Timestamp-only differences of this port are approved automatically" @click="clearEmbedsDates(r)">Yes · Clear</button></td>
             </tr>
-            <tr v-if="!recipesLoading && !recipes.items.length"><td colspan="7" class="muted">{{ recipes.total ? 'No recipes on this page.' : 'No recipes found. Try syncing the ports tree.' }}</td></tr>
+            <tr v-if="!recipesLoading && !recipes.items.length"><td colspan="8" class="muted">{{ recipes.total ? 'No recipes on this page.' : 'No recipes found. Try syncing the ports tree.' }}</td></tr>
           </tbody>
         </table>
       </div>

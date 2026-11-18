@@ -35,9 +35,21 @@ public class Recipe
     public DateTime RecipeUpdatedAt { get; set; }
 }
 
-public enum JobStatus { Queued, InProgress, Succeeded, Failed, Cancelled }
+/// <summary>
+/// Queued: needs a build (the first, or a verification build); InProgress: a client holds a build; Verifying: the server is
+/// comparing the completed builds (<see cref="Services.BuildVerifier"/>); AwaitingOverride: two builds differ only in
+/// timestamp-like bytes and an admin decides. Stored as text, at most 16 characters.
+/// </summary>
+public enum JobStatus { Queued, InProgress, Verifying, AwaitingOverride, Succeeded, Failed, Cancelled }
 
-/// <summary>A request to build one recipe for one platform.</summary>
+/// <summary>Status sets several queries share.</summary>
+public static class JobStatuses
+{
+    /// <summary>Not finished: queued, building or being verified. A recipe with an active job on a platform is not queued again.</summary>
+    public static readonly JobStatus[] Active = [JobStatus.Queued, JobStatus.InProgress, JobStatus.Verifying, JobStatus.AwaitingOverride];
+}
+
+/// <summary>A request to build one recipe for one platform. It is built (and verified) by up to three <see cref="JobBuild"/>s.</summary>
 public class Job
 {
     public long Id { get; set; }
@@ -57,10 +69,84 @@ public class Job
     public int Attempts { get; set; }
     public string? FailureSummary { get; set; }
     public bool HasLog { get; set; }
+    /// <summary>Published packages: the approved build's, created when the job succeeds.</summary>
     public List<Package> Packages { get; set; } = [];
+    public List<JobBuild> Builds { get; set; } = [];
+    /// <summary>The build whose packages were published.</summary>
+    public long? ApprovedBuildId { get; set; }
+    /// <summary>How the job was approved: <c>Match</c>, <c>Override</c> (an admin, see <see cref="ApprovedBy"/>), <c>EmbedsDates</c> (automatic: the port is flagged).</summary>
+    public string? Approval { get; set; }
+    public string? ApprovedBy { get; set; }
+    public DateTime? ApprovedAt { get; set; }
+    public string? ApprovalReason { get; set; }
+    /// <summary>Approved, but the agreeing builds came from one client (it took the next build after the independence window).</summary>
+    public bool SelfVerified { get; set; }
     /// <summary>Concurrency token: admin transitions fail with 409 if a client claimed or finished the job meanwhile.</summary>
     [System.ComponentModel.DataAnnotations.Timestamp]
     public byte[] RowVersion { get; set; } = [];
+}
+
+public enum JobBuildStatus { InProgress, Completed, Failed, Expired, Discarded }
+
+/// <summary>
+/// One build of a job by one client (a claim). Completed builds are compared by <see cref="Digest"/>; Expired (lease ran out,
+/// client deleted) and Discarded (job cancelled or requeued) builds no longer count.
+/// </summary>
+public class JobBuild
+{
+    public long Id { get; set; }
+    public long JobId { get; set; }
+    public Job? Job { get; set; }
+    /// <summary>1, 2, ... in claim order within the job (expired claims included).</summary>
+    public int Number { get; set; }
+    public Guid? ClientId { get; set; }
+    /// <summary>Kept for history after the client is deleted.</summary>
+    public string ClientName { get; set; } = "";
+    /// <summary>The client owner; becomes <see cref="Package.BuiltByUserId"/>.</summary>
+    public string OwnerId { get; set; } = "";
+    public JobBuildStatus Status { get; set; }
+    public DateTime ClaimedAt { get; set; }
+    public DateTime? CompletedAt { get; set; }
+    /// <summary>Until then only other clients may claim the job's next build: completion plus the build's own duration.</summary>
+    public DateTime? ExclusiveUntil { get; set; }
+    /// <summary>SHA-256 over the content digests of the port's packages (<see cref="Services.PackageDigest"/>); null until computed.</summary>
+    public string? Digest { get; set; }
+    /// <summary>JSON list of <see cref="Services.BuildDiff"/>: how this build differs from each earlier completed build.</summary>
+    public string? DiffJson { get; set; }
+    public List<StagedPackage> Packages { get; set; } = [];
+}
+
+/// <summary>
+/// A package a build uploaded, waiting for verification. Port packages are stored in the content-addressed blob
+/// <see cref="BlobName"/>; extras (packages of other ports the build made as dependencies) are only recorded, never stored or published.
+/// </summary>
+public class StagedPackage
+{
+    public long Id { get; set; }
+    public long BuildId { get; set; }
+    public JobBuild? Build { get; set; }
+    public string FileName { get; set; } = "";
+    /// <summary>Empty for extras, and once the blob was deleted (losing or discarded build).</summary>
+    public string BlobName { get; set; } = "";
+    public long Size { get; set; }
+    public string Sha256 { get; set; } = "";
+    public DateTime BuildDate { get; set; }
+    public DateTime UploadedAt { get; set; }
+    /// <summary>Not a package of the job's port: recorded as "extra, not published".</summary>
+    public bool Extra { get; set; }
+    /// <summary>Content digest (<see cref="Services.PackageDigest"/>); null until computed.</summary>
+    public string? Digest { get; set; }
+    /// <summary>JSON <see cref="Services.PackageListing"/> the digest was computed from, for diff reports.</summary>
+    public string? ListingJson { get; set; }
+}
+
+/// <summary>A port an admin flagged as embedding build dates: a build of it that differs from another only in timestamp-like bytes is approved automatically.</summary>
+public class DateEmbeddingPort
+{
+    public string PortName { get; set; } = "";
+    public string SetBy { get; set; } = "";
+    public DateTime SetAt { get; set; }
+    public string Reason { get; set; } = "";
 }
 
 /// <summary>An uploaded .hpkg, stored in blob <see cref="BlobName"/>.</summary>
@@ -86,6 +172,8 @@ public class Package
     /// <summary>Set instead of <see cref="JobId"/> for a package copied from another repository; such a package is public at once.</summary>
     public long? ImportId { get; set; }
     public Import? Import { get; set; }
+    /// <summary>Copied from <see cref="Job.SelfVerified"/> when published.</summary>
+    public bool SelfVerified { get; set; }
 }
 
 public enum ImportStatus { Running, Completed, Failed, Cancelled }

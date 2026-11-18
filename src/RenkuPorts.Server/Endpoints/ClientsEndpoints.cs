@@ -43,12 +43,10 @@ public static class ClientsEndpoints
         {
             var client = await Visible(db, user, users).FirstOrDefaultAsync(c => c.Id == id);
             if (client is null) return Results.NotFound();
-            // Its claimed jobs go back to the queue rather than waiting out the lease, minus what they uploaded.
-            var held = await db.Jobs.Where(j => j.ClaimedByClientId == id && j.Status == JobStatus.InProgress).Select(j => j.Id).ToListAsync();
-            await db.Jobs.Where(j => j.ClaimedByClientId == id && j.Status == JobStatus.InProgress)
-                .ExecuteUpdateAsync(s => s.SetProperty(j => j.Status, JobStatus.Queued).SetProperty(j => j.ClaimedByClientId, (Guid?)null)
-                    .SetProperty(j => j.ClaimedAt, (DateTime?)null).SetProperty(j => j.LeaseExpiresAt, (DateTime?)null));
-            await BuildClientApi.DiscardPackagesAsync(db, blobs, held);
+            // Its claimed builds go back to the queue rather than waiting out the lease, minus what they uploaded; its completed builds
+            // keep counting (under their recorded client name).
+            await BuildClientApi.ReleaseClaimsAsync(db, blobs, DateTime.UtcNow, id);
+            await db.JobBuilds.Where(b => b.ClientId == id).ExecuteUpdateAsync(s => s.SetProperty(b => b.ClientId, (Guid?)null));
             db.BuildClients.Remove(client);
             await db.SaveChangesAsync();
             return Results.NoContent();

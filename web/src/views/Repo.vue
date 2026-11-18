@@ -65,6 +65,15 @@ watch(search, (s) => {
 watch(query, (q) => { if (q !== search.value.trim()) search.value = q })
 
 const fileHref = (f) => `/repo/${platform.value}/packages/${encodeURIComponent(f)}`
+
+/** What each verification state means, for the tooltip. */
+function verificationTitle(p) {
+  return {
+    verified: 'Built independently by different build clients, with identical contents',
+    'self-verified': 'Built twice with identical contents, both times by the same build client',
+    override: 'The builds differed only in embedded dates; an administrator approved one',
+  }[p.verification]
+}
 </script>
 
 <template>
@@ -106,7 +115,8 @@ const fileHref = (f) => `/repo/${platform.value}/packages/${encodeURIComponent(f
           <tr class="details muted small">
             <td colspan="3">
               Built {{ formatDate(p.buildDate) }} · Uploaded {{ formatDate(p.uploadedAt) }} ·
-              Recipe updated {{ formatDate(p.recipeUpdatedAt) }} · Built by {{ p.builtBy || '—' }}
+              Recipe updated {{ formatDate(p.recipeUpdatedAt) }} · Built by {{ p.builtBy || '—' }}<template v-if="p.verification"> ·
+              <span :title="verificationTitle(p)">{{ p.verification === 'verified' ? `verified: ${p.verifiedClients} clients` : p.verification }}</span></template>
             </td>
           </tr>
         </tbody>

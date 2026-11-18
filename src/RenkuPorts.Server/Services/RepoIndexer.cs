@@ -103,6 +103,13 @@ public sealed class HaikuTools(string dir)
     /// <summary><c>package_repo list -f -v</c>: the repository info, then each package's attributes followed by its canonical file name.</summary>
     public Task<string> ListVerboseAsync(string repo, CancellationToken ct) => CheckAsync("package_repo", ["list", "-f", "-v", repo], null, ct);
 
+    /// <summary>Runs a tool; its output, or null if it exited with an error.</summary>
+    public async Task<string?> TryRunAsync(string tool, string[] args, CancellationToken ct)
+    {
+        var (code, output, _) = await RunAsync(tool, args, null, ct);
+        return code == 0 ? output : null;
+    }
+
     private async Task<string> CheckAsync(string tool, string[] args, string? cwd, CancellationToken ct)
     {
         var (code, output, error) = await RunAsync(tool, args, cwd, ct);

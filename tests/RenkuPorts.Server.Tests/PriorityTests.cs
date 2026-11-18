@@ -150,9 +150,7 @@ public partial class ApiTests
 
         // zlib built and published: of the rest only foo is outstanding.
         var (_, client) = await app.BuildClientAsync(admin);
-        var job = await ClaimAsync(client);
-        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(client, job.JobId, Hpkg("zlib"), [3])).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/complete", new { log = "" })).StatusCode);
+        await BuildTwiceAsync(admin, client, (Hpkg("zlib"), [3]));
         var rest = (await (await admin.PostAsJsonAsync("/api/priorities/arm64/queue-top", new { count = 5 })).Content.ReadFromJsonAsync<List<JobView>>())!;
         Assert.Equal(["foo"], rest.Select(j => j.PortName));
         Assert.Empty((await (await admin.PostAsync("/api/priorities/arm64/queue-top", JsonContent.Create(new { }))).Content.ReadFromJsonAsync<List<JobView>>())!);

@@ -24,6 +24,13 @@ public class FakeNotifier : INotifier
     }
 }
 
+/// <summary>The system clock plus an adjustable <see cref="Offset"/>, so tests can step past time windows without sleeping.</summary>
+public class TestClock : TimeProvider
+{
+    public TimeSpan Offset { get; set; }
+    public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + Offset;
+}
+
 /// <summary>
 /// The server against the compose SQL Server (database RenkuPortsTests, recreated per run) and Azurite
 /// (container packages-test), with a small generated ports tree and a wwwroot holding a stub index.html.
@@ -38,6 +45,7 @@ public class AppFactory : WebApplicationFactory<Program>
         $"Server={Environment.GetEnvironmentVariable("RENKUPORTS_TEST_SQL_SERVER") ?? "localhost,14333"};Database=RenkuPortsTests;User Id=sa;Password={Environment.GetEnvironmentVariable("RENKUPORTS_TEST_SA_PASSWORD") ?? "RenkuPorts_Local1!"};TrustServerCertificate=True";
 
     public FakeNotifier Mail { get; } = new();
+    public TestClock Clock { get; } = new();
     public string PortsTree { get; }
     private readonly string _webRoot;
 
@@ -69,11 +77,14 @@ public class AppFactory : WebApplicationFactory<Program>
         b.UseSetting("PortsTree:Path", PortsTree);
         b.UseSetting("AutoUpdate:Schedule", "false");
         b.UseSetting("Priorities:Schedule", "false");
+        b.UseSetting("Verification:Schedule", "false");
         b.UseWebRoot(_webRoot);
         b.ConfigureServices(s =>
         {
             s.RemoveAll<INotifier>();
             s.AddSingleton<INotifier>(Mail);
+            s.RemoveAll<TimeProvider>();
+            s.AddSingleton<TimeProvider>(Clock);
         });
     }
 
@@ -123,12 +134,19 @@ public class AppFactory : WebApplicationFactory<Program>
     {
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Clock.Offset = TimeSpan.Zero;
         await db.Packages.ExecuteDeleteAsync();
+        await db.StagedPackages.ExecuteDeleteAsync();
+        await db.JobBuilds.ExecuteDeleteAsync();
+        await db.DateEmbeddingPorts.ExecuteDeleteAsync();
         await db.Jobs.ExecuteDeleteAsync();
         await db.PortPriorities.ExecuteDeleteAsync();
         await db.PortDependencies.ExecuteDeleteAsync();
         if (!await db.Recipes.AnyAsync()) await RecipeScanner.SyncAsync(db, PortsTree, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
     }
+
+    /// <summary>One verifier pass (the schedule is off in tests).</summary>
+    public Task VerifyAsync() => Services.GetRequiredService<BuildVerifier>().RunOnceAsync();
 
     public async Task WithDbAsync(Func<AppDbContext, Task> action)
     {

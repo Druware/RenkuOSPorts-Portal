@@ -4,7 +4,7 @@ import { reactive } from 'vue'
 export const store = reactive({ user: null, loaded: false })
 
 export const PLATFORMS = ['x86', 'x86_64', 'arm64', 'riscv64']
-export const STATUSES = ['Queued', 'InProgress', 'Succeeded', 'Failed', 'Cancelled']
+export const STATUSES = ['Queued', 'InProgress', 'Verifying', 'AwaitingOverride', 'Succeeded', 'Failed', 'Cancelled']
 
 export class ApiError extends Error {
   constructor(status, message) {

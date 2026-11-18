@@ -134,7 +134,8 @@ namespace RenkuPorts.Client
                     var log = ReadLogTail(logPath);
                     using var done = await SendAsync(() => new HttpRequestMessage(HttpMethod.Post, $"api/client/jobs/{job.JobId}/complete")
                         { Content = JsonContent.Create(new { log }) }, ct);
-                    Log($"job {job.JobId}: succeeded, {hpkgs.Length} package(s) uploaded");
+                    // The server publishes only once another build matches (see the README, "Build verification").
+                    Log($"job {job.JobId}: build complete, {hpkgs.Length} package(s) uploaded; the server verifies it before publishing");
                 }
                 catch (Exception e) when (e is HttpRequestException or ApiException)
                 {

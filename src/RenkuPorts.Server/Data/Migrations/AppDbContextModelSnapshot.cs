@@ -308,6 +308,30 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.ToTable("BuildClients");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.DateEmbeddingPort", b =>
+                {
+                    b.Property<string>("PortName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<DateTime>("SetAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SetBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("PortName");
+
+                    b.ToTable("DateEmbeddingPorts");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Import", b =>
                 {
                     b.Property<long>("Id")
@@ -387,6 +411,24 @@ namespace RenkuPorts.Server.Data.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
 
+                    b.Property<string>("Approval")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("ApprovalReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<DateTime?>("ApprovedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<long?>("ApprovedBuildId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ApprovedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
                     b.Property<int>("Attempts")
                         .HasColumnType("int");
 
@@ -429,6 +471,9 @@ namespace RenkuPorts.Server.Data.Migrations
                         .ValueGeneratedOnAddOrUpdate()
                         .HasColumnType("rowversion");
 
+                    b.Property<bool>("SelfVerified")
+                        .HasColumnType("bit");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(16)
@@ -445,6 +490,63 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.HasIndex("Status", "Platform", "QueuedAt");
 
                     b.ToTable("Jobs");
+                });
+
+            modelBuilder.Entity("RenkuPorts.Server.Data.JobBuild", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("ClaimedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("ClientId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ClientName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DiffJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Digest")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<DateTime?>("ExclusiveUntil")
+                        .HasColumnType("datetime2");
+
+                    b.Property<long>("JobId")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("int");
+
+                    b.Property<string>("OwnerId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClientId");
+
+                    b.HasIndex("JobId", "Number")
+                        .IsUnique();
+
+                    b.ToTable("JobBuilds");
                 });
 
             modelBuilder.Entity("RenkuPorts.Server.Data.Package", b =>
@@ -493,6 +595,9 @@ namespace RenkuPorts.Server.Data.Migrations
 
                     b.Property<DateTime>("RecipeUpdatedAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<bool>("SelfVerified")
+                        .HasColumnType("bit");
 
                     b.Property<string>("Sha256")
                         .IsRequired()
@@ -613,6 +718,61 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.HasIndex("PortName", "Version");
 
                     b.ToTable("Recipes");
+                });
+
+            modelBuilder.Entity("RenkuPorts.Server.Data.StagedPackage", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("BlobName")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("nvarchar(400)");
+
+                    b.Property<DateTime>("BuildDate")
+                        .HasColumnType("datetime2");
+
+                    b.Property<long>("BuildId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Digest")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<bool>("Extra")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<string>("ListingJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<long>("Size")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UploadedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BlobName");
+
+                    b.HasIndex("BuildId", "FileName")
+                        .IsUnique();
+
+                    b.ToTable("StagedPackages");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
@@ -740,6 +900,22 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.Navigation("Recipe");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.JobBuild", b =>
+                {
+                    b.HasOne("RenkuPorts.Server.Data.BuildClient", null)
+                        .WithMany()
+                        .HasForeignKey("ClientId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
+                    b.HasOne("RenkuPorts.Server.Data.Job", "Job")
+                        .WithMany("Builds")
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.Navigation("Job");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Package", b =>
                 {
                     b.HasOne("RenkuPorts.Server.Data.AppUser", "BuiltBy")
@@ -781,7 +957,25 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.Navigation("Recipe");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.StagedPackage", b =>
+                {
+                    b.HasOne("RenkuPorts.Server.Data.JobBuild", "Build")
+                        .WithMany("Packages")
+                        .HasForeignKey("BuildId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Build");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Job", b =>
+                {
+                    b.Navigation("Builds");
+
+                    b.Navigation("Packages");
+                });
+
+            modelBuilder.Entity("RenkuPorts.Server.Data.JobBuild", b =>
                 {
                     b.Navigation("Packages");
                 });

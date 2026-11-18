@@ -3,5 +3,5 @@ defineProps({ status: { type: String, required: true } })
 </script>
 
 <template>
-  <span class="badge" :class="`badge-${status}`">{{ status === 'InProgress' ? 'In progress' : status }}</span>
+  <span class="badge" :class="`badge-${status}`">{{ { InProgress: 'In progress', AwaitingOverride: 'Awaiting override' }[status] ?? status }}</span>
 </template>

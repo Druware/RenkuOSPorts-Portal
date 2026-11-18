@@ -8,15 +8,12 @@ namespace RenkuPorts.Server.Tests;
 /// <summary>Paged package, job and recipe listings, and the admin package delete.</summary>
 public partial class ApiTests
 {
-    /// <summary>Publishes the given arm64 packages (random bytes) through one succeeded zlib job, uploaded in order.</summary>
+    /// <summary>Publishes the given arm64 packages (random bytes) through one succeeded zlib job (two matching builds), uploaded in order.</summary>
     private async Task PublishAsync(HttpClient admin, params string[] names)
     {
         var (_, client) = await app.BuildClientAsync(admin);
         await QueueAsync(admin, "zlib");
-        var job = await ClaimAsync(client);
-        foreach (var n in names)
-            Assert.Equal(HttpStatusCode.OK, (await UploadAsync(client, job.JobId, n, Guid.NewGuid().ToByteArray())).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/complete", new { log = "" })).StatusCode);
+        await BuildTwiceAsync(admin, client, names.Select(n => (n, Guid.NewGuid().ToByteArray())).ToArray());
     }
 
     private async Task<PageView<PackageView>> PageAsync(string query) =>
@@ -26,7 +23,7 @@ public partial class ApiTests
     public async Task Package_listing_is_paged_in_a_stable_newest_first_order()
     {
         var admin = await app.SignedInAsync();
-        var names = Enumerable.Range(0, 7).Select(i => Hpkg(i < 5 ? "zlib" : "other")).ToArray();
+        var names = Enumerable.Range(0, 7).Select(i => Hpkg(i < 5 ? "zlib" : "zlib_other")).ToArray();
         await PublishAsync(admin, names);
         var newestFirst = names.Reverse().ToList();
 

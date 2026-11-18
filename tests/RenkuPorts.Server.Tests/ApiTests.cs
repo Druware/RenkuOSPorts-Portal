@@ -54,6 +54,37 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         return client.PostAsync($"/api/client/jobs/{jobId}/packages", form);
     }
 
+    private async Task<JobView> JobAsync(long id) =>
+        (await (await app.SignedInAsync()).GetFromJsonAsync<PageView<JobView>>("/api/jobs?pageSize=200"))!.Items.Single(j => j.Id == id);
+
+    /// <summary>Completes a claimed build and runs one verifier pass; the job as it is then.</summary>
+    private async Task<JobView> CompleteAsync(HttpClient client, long jobId, string log = "")
+    {
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{jobId}/complete", new { log })).StatusCode);
+        await app.VerifyAsync();
+        return await JobAsync(jobId);
+    }
+
+    /// <summary>The verification build: a new client claims the job (it must be <paramref name="jobId"/>), uploads the files and completes.</summary>
+    private async Task<JobView> BuildAgainAsync(HttpClient admin, long jobId, params (string Name, byte[] Bytes)[] files)
+    {
+        var (_, second) = await app.BuildClientAsync(admin);
+        Assert.Equal(jobId, (await ClaimAsync(second)).JobId);
+        foreach (var (name, bytes) in files) Assert.Equal(HttpStatusCode.OK, (await UploadAsync(second, jobId, name, bytes)).StatusCode);
+        return await CompleteAsync(second, jobId);
+    }
+
+    /// <summary>Builds the next queued job twice, by <paramref name="first"/> and then another client, with the same files: it is published.</summary>
+    private async Task<JobView> BuildTwiceAsync(HttpClient admin, HttpClient first, params (string Name, byte[] Bytes)[] files)
+    {
+        var job = await ClaimAsync(first);
+        foreach (var (name, bytes) in files) Assert.Equal(HttpStatusCode.OK, (await UploadAsync(first, job.JobId, name, bytes)).StatusCode);
+        Assert.Equal("Queued", (await CompleteAsync(first, job.JobId)).Status);
+        var done = await BuildAgainAsync(admin, job.JobId, files);
+        Assert.Equal("Succeeded", done.Status);
+        return done;
+    }
+
     private BlobContainerClient Blobs => app.Services.GetRequiredService<BlobContainerClient>();
 
     private async Task<bool> BlobExists(string name) => (await Blobs.GetBlobClient(name).ExistsAsync()).Value;
@@ -200,7 +231,15 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         Assert.Equal(HttpStatusCode.OK, up.StatusCode);
         var complete = await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/complete", new { log = "build ok" });
         Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
-        var done = (await complete.Content.ReadFromJsonAsync<JobView>())!;
+        Assert.Equal("Verifying", (await complete.Content.ReadFromJsonAsync<JobView>())!.Status);
+        await app.VerifyAsync();
+        // One build is not enough: nothing is public until a second build matches.
+        Assert.Equal("Queued", (await JobAsync(job.JobId)).Status);
+        Assert.Equal(HttpStatusCode.NotFound, (await app.CreateClient().GetAsync($"/repo/arm64/packages/{name}")).StatusCode);
+        var (_, second) = await app.BuildClientAsync(admin);
+        Assert.Equal(job.JobId, (await ClaimAsync(second)).JobId);
+        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(second, job.JobId, name, bytes)).StatusCode);
+        var done = await CompleteAsync(second, job.JobId, "build ok");
         Assert.Equal("Succeeded", done.Status);
         Assert.Equal([name], done.Packages);
 
@@ -273,7 +312,11 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         Assert.Equal(HttpStatusCode.OK, (await UploadAsync(first, job.JobId, Hpkg("zlib"), [5])).StatusCode);
 
         var again = await ClaimAsync(second);
-        await app.WithDbAsync(async db => Assert.False(await db.Packages.AnyAsync(p => p.JobId == job.JobId)));
+        await app.WithDbAsync(async db =>
+        {
+            Assert.False(await db.StagedPackages.AnyAsync(p => p.Build!.JobId == job.JobId && p.BlobName != ""));
+            Assert.Equal([JobBuildStatus.Expired, JobBuildStatus.InProgress], await db.JobBuilds.Where(b => b.JobId == job.JobId).OrderBy(b => b.Number).Select(b => b.Status).ToListAsync());
+        });
         Assert.Equal(job.JobId, again.JobId);
         Assert.Contains("lease", app.Mail.Sent.Skip(before).Single().Subject);
         var view = Assert.Single((await admin.GetFromJsonAsync<PageView<JobView>>("/api/jobs"))!.Items);
@@ -296,7 +339,8 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         Assert.Equal(HttpStatusCode.Conflict, (await UploadAsync(client, job.JobId, name, [9, 9, 9])).StatusCode);
         // Not public until the job succeeds; then the stored package is still the first one.
         Assert.Equal(HttpStatusCode.NotFound, (await app.CreateClient().GetAsync($"/repo/arm64/packages/{name}")).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/complete", new { log = "" })).StatusCode);
+        Assert.Equal("Queued", (await CompleteAsync(client, job.JobId)).Status);
+        Assert.Equal("Succeeded", (await BuildAgainAsync(admin, job.JobId, (name, [1, 2, 3]))).Status);
         Assert.Equal([1, 2, 3], await app.CreateClient().GetByteArrayAsync($"/repo/arm64/packages/{name}"));
 
         // A later job (a rebuild without a revision bump) cannot replace the published package.
@@ -322,13 +366,14 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync($"/repo/arm64/packages/{name}")).StatusCode);
 
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/fail", new { summary = "later step failed" })).StatusCode);
-        await app.WithDbAsync(async db => Assert.False(await db.Packages.AnyAsync(p => p.JobId == job.JobId)));
+        await app.WithDbAsync(async db => Assert.False(await db.StagedPackages.AnyAsync(p => p.Build!.JobId == job.JobId && p.BlobName != "")));
 
         // Retry: requeue, reclaim, upload the same name with new content (hpkgs embed the build time).
         Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync($"/api/jobs/{job.JobId}/requeue", null)).StatusCode);
         Assert.Equal(job.JobId, (await ClaimAsync(client)).JobId);
         Assert.Equal(HttpStatusCode.OK, (await UploadAsync(client, job.JobId, name, [2, 2, 2])).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/complete", new { log = "ok" })).StatusCode);
+        Assert.Equal("Queued", (await CompleteAsync(client, job.JobId)).Status);
+        Assert.Equal("Succeeded", (await BuildAgainAsync(admin, job.JobId, (name, [2, 2, 2]))).Status);
         Assert.Equal([2, 2, 2], await anon.GetByteArrayAsync($"/repo/arm64/packages/{name}"));
     }
 
@@ -345,7 +390,7 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         await QueueAsync(admin, "zlib");
         var job = await ClaimAsync(client);
         Assert.Equal(HttpStatusCode.BadRequest, (await UploadAsync(client, job.JobId, fileName, [1])).StatusCode);
-        await app.WithDbAsync(async db => Assert.False(await db.Packages.AnyAsync()));
+        await app.WithDbAsync(async db => Assert.False(await db.Packages.AnyAsync() || await db.StagedPackages.AnyAsync()));
     }
 
     [Fact]

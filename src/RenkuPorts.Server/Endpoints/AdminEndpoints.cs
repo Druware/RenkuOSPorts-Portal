@@ -12,6 +12,7 @@ public static class AdminEndpoints
 {
     public record QueueRequest(string PortName, string? Version, string[] Platforms);
     public record QueueTopRequest(int? Count);
+    public record ApproveRequest(long BuildId, string? Reason, bool EmbedsDates);
     public record AutoUpdateRequest(bool Enabled, int IntervalHours, string[]? Platforms);
     public record AutoUpdateDto(bool Enabled, int IntervalHours, string[] Platforms, bool Running, DateTime? LastRunAt, string? LastCommit, AutoUpdateResult? LastResult);
 
@@ -64,7 +65,16 @@ public static class AdminEndpoints
             return Results.Ok(await Paged<RecipeDto>.FromAsync(q, o => (sort == "priority" ? o.OrderByDescending(x => x.pp == null ? 0 : x.pp.Priority).ThenBy(x => x.r.PortName) : o.OrderBy(x => x.r.PortName))
                     .ThenByDescending(x => x.r.Version).ThenBy(x => x.r.Id),
                 x => new RecipeDto(x.r.Id, x.r.PortName, x.r.Category, x.r.Version, x.r.RecipePath, x.r.RecipeUpdatedAt,
-                    x.pp == null ? null : x.pp.Priority, x.pp == null ? null : x.pp.Dependents, x.pp == null ? null : x.pp.Outstanding), page, pageSize));
+                    x.pp == null ? null : x.pp.Priority, x.pp == null ? null : x.pp.Dependents, x.pp == null ? null : x.pp.Outstanding,
+                    db.DateEmbeddingPorts.Any(d => d.PortName == x.r.PortName)), page, pageSize));
+        });
+
+        // Clears a port's "embeds dates" flag (set by an admin override): its timestamp-only mismatches need an admin again.
+        g.MapDelete("/ports/{portName}/embeds-dates", async (string portName, ClaimsPrincipal user, AppDbContext db, ILoggerFactory logs) =>
+        {
+            if (await db.DateEmbeddingPorts.Where(d => d.PortName == portName).ExecuteDeleteAsync() == 0) return Results.NotFound();
+            logs.CreateLogger("AdminEndpoints").LogInformation("{User} cleared the embeds-dates flag of {Port}", user.Identity?.Name, portName);
+            return Results.NoContent();
         });
 
         g.MapGet("/priorities", async (AppDbContext db, PriorityComputer priorities) =>
@@ -94,7 +104,7 @@ public static class AdminEndpoints
             var top = await db.PortPriorities.Include(p => p.Recipe)
                 .Where(p => p.Platform == platform && p.Outstanding
                     && !PublicEndpoints.Published(db).Any(k => k.Platform == platform && k.PortName == p.PortName)
-                    && !db.Jobs.Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName && (j.Status == JobStatus.Queued || j.Status == JobStatus.InProgress)))
+                    && !db.Jobs.Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName && JobStatuses.Active.Contains(j.Status)))
                 .OrderByDescending(p => p.Priority).ThenBy(p => p.PortName).Take(count).ToListAsync();
             var ids = new List<long>();
             foreach (var p in top) ids.AddRange((await QueueAsync(db, p.Recipe!, [platform], users.GetUserId(user)!)).Select(j => j.Id));
@@ -131,20 +141,56 @@ public static class AdminEndpoints
             return Results.Stream(blob.Value.Content, "text/plain; charset=utf-8");
         });
 
-        g.MapPost("/jobs/{id:long}/requeue", (long id, AppDbContext db) =>
+        // A requeued job starts over: its earlier builds no longer count.
+        g.MapPost("/jobs/{id:long}/requeue", (long id, AppDbContext db, BlobContainerClient blobs) =>
             Transition(db, id, [JobStatus.Failed, JobStatus.Cancelled], j =>
             {
                 j.Status = JobStatus.Queued;
                 j.QueuedAt = DateTime.UtcNow;
                 j.CompletedAt = null;
-            }));
+                j.FailureSummary = null;
+            }, () => Verification.DiscardBuildsAsync(db, blobs, id)));
 
-        g.MapPost("/jobs/{id:long}/cancel", (long id, AppDbContext db) =>
-            Transition(db, id, [JobStatus.Queued], j =>
+        g.MapPost("/jobs/{id:long}/cancel", (long id, AppDbContext db, BlobContainerClient blobs) =>
+            Transition(db, id, [JobStatus.Queued, JobStatus.AwaitingOverride], j =>
             {
                 j.Status = JobStatus.Cancelled;
                 j.CompletedAt = DateTime.UtcNow;
-            }));
+            }, () => Verification.DiscardBuildsAsync(db, blobs, id)));
+
+        // "Approve anyway" for builds that differ only in timestamp-like bytes: publishes the chosen build, recording who, when and why.
+        // embedsDates flags the port, so its later timestamp-only mismatches are approved automatically.
+        g.MapPost("/jobs/{id:long}/approve", async (long id, ApproveRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs,
+            RepoIndexer indexer, PriorityComputer priorities, TimeProvider time, ILoggerFactory logs) =>
+        {
+            var job = await db.Jobs.Include(j => j.Recipe).Include(j => j.Builds).ThenInclude(b => b.Packages).FirstOrDefaultAsync(j => j.Id == id);
+            if (job is null) return Results.NotFound();
+            if (job.Status != JobStatus.AwaitingOverride)
+                return Results.Problem(statusCode: 409, title: $"Job is {job.Status}", detail: "Only a job awaiting an override can be approved.");
+            var reason = req.Reason?.Trim();
+            if (string.IsNullOrEmpty(reason) || reason.Length > 1000)
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["reason"] = ["A reason is required (at most 1000 characters)."] });
+            if (job.Builds.FirstOrDefault(b => b.Id == req.BuildId && b.Status == JobBuildStatus.Completed) is not { } build)
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["buildId"] = ["One of the job's completed builds."] });
+            var by = user.Identity?.Name ?? "admin";
+            var now = time.GetUtcNow().UtcDateTime;
+            if (req.EmbedsDates && !await db.DateEmbeddingPorts.AnyAsync(d => d.PortName == job.Recipe!.PortName))
+                db.DateEmbeddingPorts.Add(new DateEmbeddingPort { PortName = job.Recipe!.PortName, SetBy = by, SetAt = now, Reason = reason });
+            try
+            {
+                if (await Verification.ApproveAsync(db, blobs, job, build, "Override", by, reason, now) is { } conflict)
+                    return Results.Problem(statusCode: 409, title: "Cannot publish this build", detail: conflict);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                return Results.Problem(statusCode: 409, title: "Job changed concurrently", detail: "Reload and try again.");
+            }
+            indexer.MarkDirty(job.Platform);
+            priorities.MarkDirty();
+            logs.CreateLogger("AdminEndpoints").LogInformation("{User} approved build {Build} of job {Job} despite differing builds: {Reason} (embeds dates: {Flag})",
+                by, build.Number, id, reason, req.EmbedsDates);
+            return Results.Ok(await db.Jobs.Where(j => j.Id == id).Select(Project.Job).FirstAsync());
+        });
 
         g.MapPost("/repo/{platform}/reindex", (string platform, RepoIndexer indexer) =>
         {
@@ -211,8 +257,8 @@ public static class AdminEndpoints
             {
                 Counts = Validate.Platforms.Select(p => new
                 {
-                    Platform = p, Queued = N(p, JobStatus.Queued), InProgress = N(p, JobStatus.InProgress),
-                    Succeeded = N(p, JobStatus.Succeeded), Failed = N(p, JobStatus.Failed),
+                    Platform = p, Queued = N(p, JobStatus.Queued), InProgress = N(p, JobStatus.InProgress), Verifying = N(p, JobStatus.Verifying),
+                    AwaitingOverride = N(p, JobStatus.AwaitingOverride), Succeeded = N(p, JobStatus.Succeeded), Failed = N(p, JobStatus.Failed),
                 }),
                 RecentFailures = await db.Jobs.Where(j => j.Status == JobStatus.Failed).OrderByDescending(j => j.CompletedAt).Take(20).Select(Project.Job).ToListAsync(),
                 Clients = await db.BuildClients.OrderBy(c => c.Name).Select(Project.Client).ToListAsync(),
@@ -234,12 +280,12 @@ public static class AdminEndpoints
     internal static readonly SemaphoreSlim SyncLock = new(1, 1);
 
     /// <summary>
-    /// Queues <paramref name="recipe"/> for each of <paramref name="platforms"/> that has no Queued or InProgress job for it yet.
+    /// Queues <paramref name="recipe"/> for each of <paramref name="platforms"/> that has no active job for it yet.
     /// <paramref name="userId"/> null means queued by <see cref="AutoUpdater"/>. Returns the jobs created.
     /// </summary>
     internal static async Task<List<Job>> QueueAsync(AppDbContext db, Recipe recipe, IEnumerable<string> platforms, string? userId)
     {
-        var busy = await db.Jobs.Where(j => j.RecipeId == recipe.Id && (j.Status == JobStatus.Queued || j.Status == JobStatus.InProgress))
+        var busy = await db.Jobs.Where(j => j.RecipeId == recipe.Id && JobStatuses.Active.Contains(j.Status))
             .Select(j => j.Platform).ToListAsync();
         var jobs = platforms.Distinct().Except(busy).Select(p => new Job
         {
@@ -251,7 +297,8 @@ public static class AdminEndpoints
     }
 
     /// <summary>Applies a status change if the job is in one of the allowed states; 409 otherwise.</summary>
-    private static async Task<IResult> Transition(AppDbContext db, long id, JobStatus[] from, Action<Job> apply)
+    /// <param name="after">Runs once the change is saved.</param>
+    private static async Task<IResult> Transition(AppDbContext db, long id, JobStatus[] from, Action<Job> apply, Func<Task>? after = null)
     {
         var job = await db.Jobs.FindAsync(id);
         if (job is null) return Results.NotFound();
@@ -263,6 +310,7 @@ public static class AdminEndpoints
         {
             return Results.Problem(statusCode: 409, title: "Job changed concurrently", detail: "Reload and try again.");
         }
+        if (after is not null) await after();
         return Results.Ok(await db.Jobs.Where(j => j.Id == id).Select(Project.Job).FirstAsync());
     }
 }

@@ -187,7 +187,13 @@ tbody.pkg tr:hover { background: none; }
 .badge-InProgress, .badge-Running { background: hsl(var(--info)); }
 .badge-Succeeded, .badge-Completed { background: hsl(var(--dot-maximize)); }
 .badge-Failed { background: hsl(var(--dot-close)); }
-.badge-Cancelled { background: hsl(var(--muted-foreground)); }
+.badge-Cancelled, .badge-Discarded, .badge-Expired { background: hsl(var(--muted-foreground)); }
+.badge-Verifying { background: hsl(var(--info)); }
+.badge-AwaitingOverride { background: hsl(var(--dot-minimize)); outline: 2px solid hsl(var(--dot-close)); }
+.badge-self { background: hsl(var(--dot-minimize)); }
+.diff-runs { font-family: var(--font-mono); font-size: .8rem; overflow-wrap: anywhere; }
+.builds { list-style: none; margin: .4rem 0; padding: 0; }
+.builds li { padding: .15rem 0; }
 .pill { font-family: var(--font-mono); font-size: .8rem; border: 1px solid hsl(var(--border)); border-radius: 999px; padding: 0 .5rem; }
 
 .failures { list-style: none; margin: 0; padding: 0; }

@@ -9,6 +9,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Recipe> Recipes => Set<Recipe>();
     public DbSet<Job> Jobs => Set<Job>();
     public DbSet<Package> Packages => Set<Package>();
+    public DbSet<JobBuild> JobBuilds => Set<JobBuild>();
+    public DbSet<StagedPackage> StagedPackages => Set<StagedPackage>();
+    public DbSet<DateEmbeddingPort> DateEmbeddingPorts => Set<DateEmbeddingPort>();
     public DbSet<Import> Imports => Set<Import>();
     public DbSet<AutoUpdateSettings> AutoUpdateSettings => Set<AutoUpdateSettings>();
     public DbSet<PortPriority> PortPriorities => Set<PortPriority>();
@@ -57,6 +60,40 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             e.HasOne(x => x.QueuedBy).WithMany().HasForeignKey(x => x.QueuedByUserId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.ClaimedBy).WithMany().HasForeignKey(x => x.ClaimedByClientId).OnDelete(DeleteBehavior.SetNull);
             e.HasMany(x => x.Packages).WithOne(p => p.Job).HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.NoAction);
+            e.Property(x => x.Approval).HasMaxLength(16);
+            e.Property(x => x.ApprovedBy).HasMaxLength(256);
+            e.Property(x => x.ApprovalReason).HasMaxLength(1000);
+        });
+
+        b.Entity<JobBuild>(e =>
+        {
+            // Status is stored as text; the claim and lease SQL in BuildClientApi depend on these names.
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.ClientName).HasMaxLength(100);
+            e.Property(x => x.Digest).HasMaxLength(64);
+            e.HasIndex(x => new { x.JobId, x.Number }).IsUnique();
+            // NoAction both ways: SQL Server rejects a second cascade path from BuildClients (via Jobs); jobs are not deleted.
+            e.HasOne(x => x.Job).WithMany(j => j.Builds).HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.NoAction);
+            e.HasOne<BuildClient>().WithMany().HasForeignKey(x => x.ClientId).OnDelete(DeleteBehavior.NoAction);
+        });
+
+        b.Entity<StagedPackage>(e =>
+        {
+            e.Property(x => x.FileName).HasMaxLength(255);
+            e.Property(x => x.BlobName).HasMaxLength(400);
+            e.Property(x => x.Sha256).HasMaxLength(64);
+            e.Property(x => x.Digest).HasMaxLength(64);
+            e.HasIndex(x => new { x.BuildId, x.FileName }).IsUnique();
+            e.HasIndex(x => x.BlobName);
+            e.HasOne(x => x.Build).WithMany(b => b.Packages).HasForeignKey(x => x.BuildId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<DateEmbeddingPort>(e =>
+        {
+            e.HasKey(x => x.PortName);
+            e.Property(x => x.PortName).HasMaxLength(200);
+            e.Property(x => x.SetBy).HasMaxLength(256);
+            e.Property(x => x.Reason).HasMaxLength(1000);
         });
 
         b.Entity<Package>(e =>

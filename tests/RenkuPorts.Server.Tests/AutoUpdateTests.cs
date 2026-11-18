@@ -65,9 +65,7 @@ public partial class ApiTests
         // Publish autoport 1.0 revision 1 on arm64.
         var (_, client) = await app.BuildClientAsync(admin);
         await QueueAsync(admin, "autoport");
-        var job = await ClaimAsync(client);
-        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(client, job.JobId, "autoport-1.0-1-arm64.hpkg", [1, 2])).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{job.JobId}/complete", new { log = "" })).StatusCode);
+        await BuildTwiceAsync(admin, client, ("autoport-1.0-1-arm64.hpkg", [1, 2]));
 
         // A change without a REVISION bump, and a change to a port we do not publish: both skipped.
         WriteRecipe(repo, "autoport", "1.0", 1, "# tweak\n");

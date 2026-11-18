@@ -22,6 +22,8 @@ RUN mkdir haiku/generated && cd haiku/generated && ../configure --host-only \
 # SDK plus the tools, for the test that runs package_repo on real packages (tests/run-haiku-tools-test.sh).
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS tools-test
 COPY --from=haiku-tools /out/ /opt/haiku-tools/
+# `package create` checks licenses against the build tree's data directory (compiled in as /b/haiku/generated/../data/system/data).
+RUN mkdir -p /b/haiku/generated/attributes /b/haiku/data/system/data/licenses && echo MIT > /b/haiku/data/system/data/licenses/MIT
 ENV RENKUPORTS_REQUIRE_HAIKU_TOOLS=1
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
@@ -39,6 +41,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 WORKDIR /app
 COPY --from=build /app ./
 COPY --from=haiku-tools /out/ /opt/haiku-tools/
+# `package extract` (build verification) stores file attributes under this path, compiled into libroot_build; without it every
+# extraction fails and packages are compared byte for byte, which never matches. The verifier empties it after each job.
+RUN mkdir -p /b/haiku/generated/attributes && chown -R "$APP_UID" /b/haiku/generated
 ENV ASPNETCORE_HTTP_PORTS=8080
 EXPOSE 8080
 USER $APP_UID
