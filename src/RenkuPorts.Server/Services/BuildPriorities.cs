@@ -235,6 +235,7 @@ public sealed class PriorityComputer(IServiceScopeFactory scopes, BlobContainerC
         using var renewing = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var renew = RepoIndexer.RenewAsync(lease, renewing.Token);
         _running = true;
+        LastError = null; // a previous run's error is stale while this one is in progress
         try
         {
             using var scope = scopes.CreateScope();

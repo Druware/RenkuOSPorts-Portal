@@ -161,6 +161,17 @@ public partial class ApiTests
     }
 
     [Fact]
+    public async Task Queue_top_n_is_a_conflict_before_priorities_are_calculated()
+    {
+        var admin = await app.SignedInAsync();
+        await SetPriorityAsync("zlib", 7, platform: "x86"); // another platform's rows do not count
+        var res = await admin.PostAsJsonAsync("/api/priorities/arm64/queue-top", new { count = 1 });
+        Assert.Equal(HttpStatusCode.Conflict, res.StatusCode);
+        Assert.Contains("sync recipes", await res.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync("/api/priorities/arm64/queue-top", new { count = 0 })).StatusCode);
+    }
+
+    [Fact]
     public async Task Priority_endpoints_are_admin_only()
     {
         var builder = await app.BuilderAsync();

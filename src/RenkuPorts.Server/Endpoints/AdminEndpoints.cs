@@ -96,11 +96,16 @@ public static class AdminEndpoints
         });
 
         // The highest-priority outstanding ports with nothing published, queued or building on the platform yet.
-        g.MapPost("/priorities/{platform}/queue-top", async (string platform, QueueTopRequest? req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
+        g.MapPost("/priorities/{platform}/queue-top", async (string platform, QueueTopRequest? req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db, PriorityComputer priorities) =>
         {
             if (!Validate.IsPlatform(platform)) return Results.NotFound();
             var count = req?.Count ?? 20;
             if (count is < 1 or > 200) return Results.ValidationProblem(new Dictionary<string, string[]> { ["count"] = ["From 1 to 200."] });
+            // No rows yet means "not computed", not "nothing outstanding"; existing rows stay usable during a recompute.
+            if (!await db.PortPriorities.AnyAsync(p => p.Platform == platform))
+                return Results.Problem(statusCode: 409, title: "Build priorities not calculated yet", detail: priorities.Running
+                    ? $"Build priorities for {platform} are being calculated now; try again in a few minutes."
+                    : $"Build priorities for {platform} have not been calculated; sync recipes (or recompute priorities) first.");
             var top = await db.PortPriorities.Include(p => p.Recipe)
                 .Where(p => p.Platform == platform && p.Outstanding
                     && !PublicEndpoints.Published(db).Any(k => k.Platform == platform && k.PortName == p.PortName)

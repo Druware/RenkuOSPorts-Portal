@@ -109,6 +109,32 @@ Key Vault references and the managed identity: the references are app-level sett
 3. `AllowedHosts` is `*`; tighten to the real host name if desired.
 4. The sync lock is per instance; run one instance, or accept that two syncs on different instances can overlap.
 
+## Database permissions
+
+The app signs in to Azure SQL as the Web App's system-assigned managed identity, so it needs a contained user in the app database. Connect to the app database (not `master`) as the server's Entra admin, for example with the portal's Query editor or `sqlcmd --authentication-method ActiveDirectoryDefault` after `az login`, and run the following. The user name is the Web App's name, or `<app name>/slots/<slot>` for a deployment slot.
+
+```sql
+CREATE USER [<app name>] FROM EXTERNAL PROVIDER;
+ALTER ROLE db_datareader ADD MEMBER [<app name>];
+ALTER ROLE db_datawriter ADD MEMBER [<app name>];
+ALTER ROLE db_ddladmin  ADD MEMBER [<app name>];  -- only while Database:MigrateOnStartup is true
+
+-- check
+SELECT p.name, r.name AS role
+FROM sys.database_role_members m
+JOIN sys.database_principals p ON p.principal_id = m.member_principal_id
+JOIN sys.database_principals r ON r.principal_id = m.role_principal_id
+WHERE p.name = '<app name>';
+```
+
+`db_owner` is not needed. The migrations create and alter tables, indexes and foreign keys, which `db_ddladmin` covers, and their only raw SQL is `UPDATE` and `DELETE`, which `db_datawriter` covers. The database must exist before the app starts (`az sql db create` below), because creating it would need `dbmanager` in `master`.
+
+To keep DDL rights away from the running app, set `Database__MigrateOnStartup=false`, apply migrations from the pipeline with an identity that has the same three roles (see "Migrations" above), and drop the role from the app:
+
+```sql
+ALTER ROLE db_ddladmin DROP MEMBER [<app name>];
+```
+
 ## Step-by-step with the Azure CLI
 
 Placeholders in angle brackets. Run these yourself after reviewing; they are not executed by anything in this repo. Resource names for ACR, storage, Key Vault, SQL server and the app must be globally unique. The sitecontainers commands need a recent Azure CLI (the `az webapp sitecontainers` group exists in 2.81.0; the flags below were copied from its `-h` output).
@@ -142,11 +168,7 @@ Placeholders in angle brackets. Run these yourself after reviewing; they are not
       --external-admin-name <your-entra-user> --external-admin-sid <your-object-id>
     az sql db create -g $RG -s $SQLS -n $DB --edition Standard --service-objective S0
     az sql server firewall-rule create -g $RG -s $SQLS -n AllowAzureServices --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
-    # then, connected to $DB as the Entra admin (the user is the app's identity, named after the app):
-    #   CREATE USER [<app name>] FROM EXTERNAL PROVIDER;
-    #   ALTER ROLE db_datareader ADD MEMBER [<app name>];
-    #   ALTER ROLE db_datawriter ADD MEMBER [<app name>];
-    #   ALTER ROLE db_ddladmin  ADD MEMBER [<app name>];
+    # then grant the app's identity access to $DB: see "Database permissions" above
 
     # email
     az communication create -g $RG -n $ACS --location global --data-location <e.g. Europe>
