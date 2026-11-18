@@ -73,12 +73,30 @@ Two scripts ship in `client/scripts/`:
 
 A job is created `Queued`. A client's `POST /api/client/jobs/next` atomically claims the oldest Queued job for its platform: the job becomes `InProgress`, records the client, claim time and lease expiry (now plus `Jobs:LeaseHours`, default 72), and increments `attempts`. The client uploads each package and then calls complete, which requires at least one uploaded package and sets `Succeeded`; the packages appear in the public repository immediately. If the build or upload fails the client calls fail: the job becomes `Failed`, the claim is cleared, the summary and log are kept, and every user in the `Admin` role gets an email. An admin can requeue a Failed or Cancelled job, or cancel a Queued one. At each `next` call, InProgress jobs whose lease has expired are returned to Queued and the admins are emailed; a late complete or fail from the old client then gets 409 (job no longer InProgress) or 403 (reclaimed by another client). Uploading a package whose platform and file name already exist is a no-op if the SHA-256 matches and a 409 if it differs. Logs are stored in blob storage as `logs/<jobId>.log`, packages as `<platform>/<sha256>/<fileName>`, and the ASP.NET Data Protection keys as `dataprotection/keys.xml` in the same container.
 
+## Package repository index (pkgman)
+
+Each platform has a pkgman repository at `<PublicBaseUrl>/repo/<platform>`: `repo.info`, `repo` and `repo.sha256` (404 until the first build) next to the existing `packages/<file>`. On Haiku: `pkgman add-repo https://<host>/repo/arm64`. The repository page shows that command once the platform's `repo.info` exists.
+
+How it is built (`Services/RepoIndexer.cs`, after `renkuos/bootstrap/arm64/publish-repo.sh` in RenkuOSPorts):
+
+- Input: the published packages (job `Succeeded`) of the platform, the newest version and revision of each package name (file names are `<name>-<version>-<revision>-<arch>.hpkg`), without `_debuginfo` and `_source` packages.
+- Each package new to the index is downloaded and checked with Haiku's `package` tool: it must be a valid hpkg, its vendor must equal `RepoIndex:Vendor` (package_repo refuses others), its architecture must be the platform's, `any` or `source`, and its file name must be its canonical name (pkgman downloads `packages/<canonical name>`). A package that fails is left out with the reason, shown on the admin dashboard; the mock packages from `mock-build.sh` are always left out this way.
+- The first build runs `package_repo create`. Later builds run `package_repo update -t` on the previous `repo`, so only new packages are downloaded; if that fails, the indexer falls back to a full `create`. The files go to blob `<platform>/index/`, `repo` before `repo.sha256`, so a mismatched pair is visible only between those two uploads (pkgman then reports a checksum error and a retry succeeds). `state.json` there records what the index was built from and what was excluded.
+- A succeeded job marks its platform dirty; the rebuild runs once no further job succeeded for `RepoIndex:DebounceSeconds` (default 60). Every platform is also checked at startup, which does nothing if its inputs are unchanged. The Reindex button on the dashboard (`POST /api/repo/<platform>/reindex`, Admin) forces a full rebuild. A blob lease on `<platform>/index/lock` lets one instance at a time build a platform.
+- Settings: `RepoIndex:PublicBaseUrl` (the site's public origin, written into `repo.info` as the base URL; default `http://localhost:8080`), `RepoIndex:Name` (`RenkuOSPorts`), `RepoIndex:Vendor` (`Haiku Project`), `RepoIndex:Summary` (`RenkuOSPorts packages for <platform>`), `RepoIndex:Priority` (1), `RepoIndex:IdentifierPrefix` (`tag:renkuos.org,2026:repositories/renkuosports`, `/<platform>` is appended), `RepoIndex:ToolsPath` (`/opt/haiku-tools`).
+
+The tools are Linux binaries. The Dockerfile builds them from Haiku source (the `haiku-tools` stage: Haiku's jam from `haiku/buildtools`, then `configure --host-only` and `jam '<build>package_repo' '<build>package'` on the RenkuOS source commit in `HAIKU_COMMIT`) for the image's own architecture, so the arm64 image built here and the amd64 image built for App Service each get matching tools. Without the tools (for example `dotnet run` on macOS) the server works normally but does not build indexes; the dashboard says so and the Reindex endpoint answers 503.
+
 ## Tests
 
 The xUnit integration tests run the real server against the compose SQL Server and Azurite, so start those first. The test database is `RenkuPortsTests` and the blob container `packages-test`; the SA password comes from `RENKUPORTS_TEST_SA_PASSWORD`, defaulting to the one in `.env.example`.
 
     docker compose up -d sql azurite
     dotnet test tests/RenkuPorts.Server.Tests
+
+One test runs the real `package` and `package_repo` tools on real hpkgs (create, then an incremental `update -t`, checked with `package_repo list`). On macOS it is reported as skipped. Run it in a Linux container built from the Dockerfile's `tools-test` stage, which has the SDK and the tools and requires them to be present, with a directory of real packages (it uses `packaging-26.2-1-any.hpkg`, `markupsafe-2.1.3-3-arm64.hpkg` and `libbase58_devel-0.1.4-2-arm64.hpkg`):
+
+    tests/run-haiku-tools-test.sh ../build-arm64/build-vm/repo/packages
 
 ## Configuration notes
 
@@ -88,6 +106,5 @@ Besides the keys in `appsettings.json`: `Database:MigrateOnStartup` (default tru
 
 - Managed identity access to Blob Storage and Communication Services, and Application Insights, are implemented but not tested against real Azure.
 - The recipe-sync lock is per server instance, so two instances could sync at once.
-- There is no pkgman-compatible repository index (`repo.info`, `repo`) yet; packages can be listed and downloaded from `/repo/<platform>/packages/<file>`, but Haiku's package manager cannot add the site as a repository.
 - Package downloads are proxied through the web app and do not support HTTP range requests.
 - Only arm64 has a real build script; `x86`, `x86_64` and `riscv64` clients need their own `BuildCommand`.

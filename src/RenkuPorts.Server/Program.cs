@@ -63,6 +63,9 @@ builder.Services.AddSingleton<INotifier>(sp => cfg["Email:Mode"] == "AzureCommun
     : new SmtpNotifier(cfg));
 
 // Room for a 5 MB build log sent as a form field to /complete. Package uploads do not use form binding.
+builder.Services.AddSingleton<RepoIndexer>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RepoIndexer>());
+
 builder.Services.Configure<FormOptions>(o => o.ValueLengthLimit = 16 << 20);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddProblemDetails();

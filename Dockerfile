@@ -1,4 +1,29 @@
-# Server image: the Vue SPA (web/) built into the ASP.NET Core server's wwwroot.
+# Server image: the Vue SPA (web/) built into the ASP.NET Core server's wwwroot, plus Haiku's package and
+# package_repo host tools for the pkgman repository index.
+
+# Haiku host tools, built from source for the image's own architecture (amd64 for App Service, arm64 on this Mac).
+# Ubuntu 24.04, like the aspnet:10.0 runtime, so the tools find the same libstdc++, zlib and zstd there.
+FROM ubuntu:24.04 AS haiku-tools
+ARG HAIKU_REPO=https://github.com/RenkuOS/Source.git
+ARG HAIKU_COMMIT=b2dd07cd0374784547b2f4bfd33d95ed541ae983
+ARG BUILDTOOLS_COMMIT=33d46bf5c300bd34cd07c596431e4545c754ac03
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git g++ make bison flex python3 nasm attr \
+        zlib1g-dev libzstd-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /b
+RUN git init -q buildtools && cd buildtools && git fetch -q --depth 1 https://github.com/haiku/buildtools.git "$BUILDTOOLS_COMMIT" \
+    && git checkout -q FETCH_HEAD && cd jam && make && ./jam0 install
+RUN git init -q haiku && cd haiku && git fetch -q --depth 1 "$HAIKU_REPO" "$HAIKU_COMMIT" && git checkout -q FETCH_HEAD
+RUN mkdir haiku/generated && cd haiku/generated && ../configure --host-only \
+    && jam -q -j"$(nproc)" '<build>package_repo' '<build>package' \
+    && mkdir /out && cp objects/linux/*/release/tools/package/package objects/linux/*/release/tools/package_repo/package_repo \
+        objects/linux/lib/libroot_build.so objects/linux/lib/libbe_build.so objects/linux/lib/libpackage_build.so /out/ \
+    && LD_LIBRARY_PATH=/out /out/package_repo help > /dev/null
+
+# SDK plus the tools, for the test that runs package_repo on real packages (tests/run-haiku-tools-test.sh).
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS tools-test
+COPY --from=haiku-tools /out/ /opt/haiku-tools/
+ENV RENKUPORTS_REQUIRE_HAIKU_TOOLS=1
+
 FROM node:22-bookworm-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
@@ -19,6 +44,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./
+COPY --from=haiku-tools /out/ /opt/haiku-tools/
 ENV ASPNETCORE_HTTP_PORTS=8080
 EXPOSE 8080
 USER $APP_UID

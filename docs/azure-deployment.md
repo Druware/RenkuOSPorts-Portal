@@ -54,6 +54,7 @@ The app reads configuration through `IConfiguration`, so each key maps to an App
 | `PortsTree:Branch` | `PortsTree__Branch` | Plain setting, optional, default `main` |
 | `Database:MigrateOnStartup` | `Database__MigrateOnStartup` | Plain setting, default true; `false` when migrations are applied by the pipeline |
 | `Jobs:LeaseHours` | `Jobs__LeaseHours` | Plain setting, optional, default 72 |
+| `RepoIndex:PublicBaseUrl` | `RepoIndex__PublicBaseUrl` | Plain setting, `https://<APP>.azurewebsites.net` or the custom domain; it is the base URL in each platform's `repo.info`, so pkgman fetches from it. Other `RepoIndex` keys are optional (see the README) |
 | `Seed:AdminEmail` | `Seed__AdminEmail` | Plain setting |
 | `Seed:AdminPassword` | `Seed__AdminPassword` | Key Vault secret; read only when the admin account does not exist yet, so it can be removed after first start |
 
@@ -76,6 +77,7 @@ Platform settings, not read by the app code:
 - **SQL.** `EnableRetryOnFailure` is on. Edge case: a transient error after the job-claim UPDATE commits can make the retry claim a second job; the stray job waits out its lease (default 72 h) or can be requeued. SQL managed identity works through the connection string (`Authentication=Active Directory Default` or `Active Directory Managed Identity`, SqlClient 6.1.7); the app identity needs a contained database user with `db_datareader`, `db_datawriter` and, while it migrates at startup, `db_ddladmin`.
 - **Migrations.** Applied at startup unless `Database:MigrateOnStartup=false`. For a pipeline step generate a script with `dotnet ef migrations script --idempotent -p src/RenkuPorts.Server -o migrate.sql` and apply it with `sqlcmd` or `az sql` using an Entra identity before deploying. With several instances and startup migration enabled they can race; use the pipeline route before scaling out.
 - **Telemetry.** Setting `APPLICATIONINSIGHTS_CONNECTION_STRING` enables Azure Monitor OpenTelemetry. Untested against real Azure.
+- **pkgman repository index.** A background service builds `repo`, `repo.info` and `repo.sha256` per platform into blob `<platform>/index/` with Haiku's `package_repo`, which the image builds from source for its own architecture (amd64 under `az acr build`). Instances coordinate through a blob lease per platform, so scaling out is safe. Index temp files (new packages only, after the first build) go to the container's temp directory; the first build of a platform downloads all of its newest packages there once.
 - **Forwarded headers** are still the `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` app setting; the code does not call `UseForwardedHeaders`.
 
 ## Remaining issues
@@ -159,6 +161,7 @@ Placeholders in angle brackets. Run these yourself after reviewing; they are not
       Seed__AdminEmail=<admin email> "Seed__AdminPassword=@Microsoft.KeyVault(SecretUri=$KVU/admin-password/)" \
       WEBSITES_ENABLE_APP_SERVICE_STORAGE=true PortsTree__Path=/home/ports \
       PortsTree__GitUrl=<ports repo URL> PortsTree__Branch=main \
+      RepoIndex__PublicBaseUrl=https://$APP.azurewebsites.net \
       APPLICATIONINSIGHTS_CONNECTION_STRING=<from the App Insights resource>
 
     # first image push (from the repo root), then point the app at it

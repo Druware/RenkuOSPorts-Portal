@@ -17,7 +17,7 @@ using RenkuPorts.Server.Services;
 namespace RenkuPorts.Server.Endpoints;
 
 /// <summary>The API build clients call with their bearer token: claim a job, upload its packages, complete or fail it.</summary>
-public static class BuildClientApi
+public static partial class BuildClientApi
 {
     /// <summary>Largest accepted .hpkg upload (4 GiB).</summary>
     public const long MaxUpload = 4L << 30;
@@ -186,7 +186,7 @@ public static class BuildClientApi
             return Results.Ok(result);
         }).WithMetadata(new RequestSizeLimitAttribute(MaxUpload + (1 << 20)));
 
-        g.MapPost("/{id:long}/complete", async (long id, HttpContext http, AppDbContext db, BlobContainerClient blobs) =>
+        g.MapPost("/{id:long}/complete", async (long id, HttpContext http, AppDbContext db, BlobContainerClient blobs, RepoIndexer indexer) =>
         {
             var client = (BuildClient)http.Items[ClientItem]!;
             var (job, error) = await ClaimedJob(db, id, client);
@@ -206,7 +206,9 @@ public static class BuildClientApi
             job.Status = JobStatus.Succeeded;
             job.CompletedAt = DateTime.UtcNow;
             job.LeaseExpiresAt = null;
-            return (await SaveJob(db, job)).Result;
+            var (res, saved) = await SaveJob(db, job);
+            if (saved) indexer.MarkDirty(job.Platform);
+            return res;
         });
 
         g.MapPost("/{id:long}/fail", async (long id, FailRequest req, HttpContext http, AppDbContext db, BlobContainerClient blobs,
@@ -287,9 +289,16 @@ public static class BuildClientApi
 
     private static async Task SaveLog(BlobContainerClient blobs, Job job, string log)
     {
-        await blobs.GetBlobClient(LogBlob(job.Id)).UploadAsync(BinaryData.FromString(log), overwrite: true);
+        await blobs.GetBlobClient(LogBlob(job.Id)).UploadAsync(BinaryData.FromString(StripAnsi(log)), overwrite: true);
         job.HasLog = true;
     }
+
+    /// <summary>Removes terminal escape sequences (HaikuPorter colours its output), which the log viewer would show as junk.</summary>
+    public static string StripAnsi(string log) => AnsiEscape().Replace(log, "");
+
+    /// <summary>CSI sequences (<c>ESC [ ... final</c>), OSC sequences (<c>ESC ] ... BEL|ST</c>), then any lone ESC left over.</summary>
+    [System.Text.RegularExpressions.GeneratedRegex(@"\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)|\x1B")]
+    private static partial System.Text.RegularExpressions.Regex AnsiEscape();
 
     /// <summary>Emails every Admin. A mail failure is logged, not returned: the job state change has already been saved.</summary>
     private static async Task NotifyAdmins(UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs, string subject, string body)

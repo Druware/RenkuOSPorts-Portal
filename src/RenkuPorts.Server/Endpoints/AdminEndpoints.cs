@@ -97,7 +97,15 @@ public static class AdminEndpoints
                 j.CompletedAt = DateTime.UtcNow;
             }));
 
-        g.MapGet("/dashboard", async (AppDbContext db) =>
+        g.MapPost("/repo/{platform}/reindex", (string platform, RepoIndexer indexer) =>
+        {
+            if (!Validate.IsPlatform(platform)) return Results.NotFound();
+            if (!indexer.Tools.Available) return Results.Problem(statusCode: 503, title: indexer.DisabledReason);
+            indexer.RequestReindex(platform);
+            return Results.Accepted();
+        });
+
+        g.MapGet("/dashboard", async (AppDbContext db, RepoIndexer indexer) =>
         {
             var counts = await db.Jobs.GroupBy(j => new { j.Platform, j.Status }).Select(x => new { x.Key.Platform, x.Key.Status, N = x.Count() }).ToListAsync();
             int N(string p, JobStatus s) => counts.FirstOrDefault(c => c.Platform == p && c.Status == s)?.N ?? 0;
@@ -110,6 +118,16 @@ public static class AdminEndpoints
                 }),
                 RecentFailures = await db.Jobs.Where(j => j.Status == JobStatus.Failed).OrderByDescending(j => j.CompletedAt).Take(20).Select(Project.Job).ToListAsync(),
                 Clients = await db.BuildClients.OrderBy(c => c.Name).Select(Project.Client).ToListAsync(),
+                RepoIndex = await Task.WhenAll(Validate.Platforms.Select(async p =>
+                {
+                    var s = await indexer.StateAsync(p);
+                    return new
+                    {
+                        Platform = p, s?.BuiltAt, PackageCount = s?.Packages.Count ?? 0,
+                        Excluded = s?.Excluded.Select(x => new { x.FileName, x.Reason }) ?? [],
+                        Error = indexer.Tools.Available ? s?.Error : indexer.DisabledReason,
+                    };
+                })),
             };
         });
     }

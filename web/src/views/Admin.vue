@@ -76,6 +76,13 @@ async function queue() {
   } catch (e) { fail(e) }
 }
 
+async function reindex(platform) {
+  try {
+    await api(`/repo/${platform}/reindex`, { method: 'POST' })
+    ok(`Rebuilding the ${platform} repository index; the dashboard shows the result when it is done.`)
+  } catch (e) { fail(e) }
+}
+
 watch(tab, (t) => {
   notice.value = ''
   if (t === 'dashboard') loadDashboard()
@@ -125,6 +132,29 @@ watch(tab, (t) => {
           <JobLog v-if="j.hasLog" :job-id="j.id" />
         </li>
       </ul>
+    </HaikuWindow>
+
+    <HaikuWindow title="Repository index">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Platform</th><th scope="col">Built</th><th scope="col" class="num">Packages</th><th scope="col">Excluded</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            <tr v-for="r in dash?.repoIndex || []" :key="r.platform">
+              <th scope="row">{{ r.platform }}</th>
+              <td><span class="nowrap">{{ formatDate(r.builtAt) }}</span><div v-if="r.error" class="small text-danger">{{ r.error }}</div></td>
+              <td class="num">{{ r.packageCount }}</td>
+              <td class="small">
+                <span v-if="!r.excluded.length" class="muted">—</span>
+                <details v-else>
+                  <summary>{{ r.excluded.length }} excluded</summary>
+                  <ul><li v-for="x in r.excluded" :key="x.fileName"><code>{{ x.fileName }}</code>: {{ x.reason }}</li></ul>
+                </details>
+              </td>
+              <td><button type="button" class="btn btn-small" @click="reindex(r.platform)">Reindex</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </HaikuWindow>
 
     <HaikuWindow title="Build clients">

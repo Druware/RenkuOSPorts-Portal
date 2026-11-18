@@ -9,6 +9,17 @@ const route = useRoute()
 const platform = computed(() => route.params.platform)
 const known = computed(() => PLATFORMS.includes(platform.value))
 const repoUrl = computed(() => `${location.origin}/repo/${platform.value}`)
+const addRepo = computed(() => `pkgman add-repo ${repoUrl.value}`)
+const indexed = ref(false) // the platform's repo.info exists, so pkgman can add the repository
+
+async function checkIndex() {
+  const p = platform.value
+  indexed.value = false
+  try {
+    const res = await fetch(`/repo/${p}/repo.info`, { cache: 'no-store' })
+    if (p === platform.value) indexed.value = res.ok
+  } catch { /* offline: leave the hint hidden */ }
+}
 
 const search = ref('')
 const packages = ref([])
@@ -33,7 +44,7 @@ async function load() {
   }
 }
 
-watch(platform, () => { search.value = ''; packages.value = []; load() }, { immediate: true })
+watch(platform, () => { search.value = ''; packages.value = []; load(); if (known.value) checkIndex() }, { immediate: true })
 watch(search, () => { clearTimeout(timer); timer = setTimeout(load, 250) })
 
 const fileHref = (f) => `/repo/${platform.value}/packages/${encodeURIComponent(f)}`
@@ -47,11 +58,12 @@ const fileHref = (f) => `/repo/${platform.value}/packages/${encodeURIComponent(f
   <p v-if="!known" class="error" role="alert">Unknown platform “{{ platform }}”.</p>
 
   <HaikuWindow v-else :title="`Packages — ${platform}`">
-    <p class="hint">
-      pkgman repository base URL:
-      <code>{{ repoUrl }}</code>
-      <CopyButton :text="repoUrl" label="Copy URL" />
+    <p v-if="indexed" class="hint">
+      Add this repository in Haiku:
+      <code>{{ addRepo }}</code>
+      <CopyButton :text="addRepo" label="Copy command" />
     </p>
+    <p v-else class="hint muted">The pkgman repository index for {{ platform }} has not been built yet.</p>
     <div class="toolbar">
       <label for="pkg-search">Search packages</label>
       <input id="pkg-search" v-model="search" type="search" placeholder="e.g. gcc, python" autocomplete="off" />
