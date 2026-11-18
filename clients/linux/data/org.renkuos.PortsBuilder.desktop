@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RenkuPorts Builder
+Comment=Build RenkuOSPorts jobs in the renkuports-builder container
+Exec=renkuports-builder
+Icon=applications-development
+Terminal=false
+Categories=Development;

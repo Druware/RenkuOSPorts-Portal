@@ -1,0 +1,8 @@
+# Build and test environment for the Linux client, for hosts without GTK 4 (run from the repository root):
+#   docker build -t renkuports-linux-dev -f clients/linux/Dockerfile.dev clients/linux
+#   docker run --rm -v "$PWD/clients/linux:/src:ro" renkuports-linux-dev sh -c \
+#     'cp -r /src /tmp/linux && cd /tmp/linux && meson setup build && meson compile -C build && meson test -C build --print-errorlogs'
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libc6-dev meson ninja-build pkg-config libgtk-4-dev libsoup-3.0-dev libjson-glib-dev python3 xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
