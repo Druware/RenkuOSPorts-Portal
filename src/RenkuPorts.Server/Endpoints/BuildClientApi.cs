@@ -21,10 +21,12 @@ public static partial class BuildClientApi
     /// <summary>Largest accepted .hpkg upload (4 GiB).</summary>
     public const long MaxUpload = 4L << 30;
     private const string ClientItem = "build-client";
+    private const string ReleasedPrefix = "Released: ";
 
     public record TokenRequest(string? ClientId, string? Secret);
     public record LogBody(string? Log);
     public record FailRequest(string? Summary, string? Log);
+    public record ReleaseRequest(string? Reason, string? Log);
 
     public static string LogBlob(long jobId) => $"logs/{jobId}.log";
 
@@ -218,6 +220,8 @@ public static partial class BuildClientApi
             build.CompletedAt = now;
             build.ExclusiveUntil = now + (now - build.ClaimedAt);
             job.Status = JobStatus.Verifying;
+            // A release reason describes an earlier claim, not this build; a real fail summary never reaches here (Failed jobs start over).
+            if (job.FailureSummary?.StartsWith(ReleasedPrefix, StringComparison.Ordinal) == true) job.FailureSummary = null;
             job.ClaimedByClientId = null;
             job.ClaimedAt = null;
             job.LeaseExpiresAt = null;
@@ -256,6 +260,24 @@ public static partial class BuildClientApi
             }
             return res;
         });
+
+        // The client gives the job back without a result (infrastructure failure, client stopped): it is requeued like an
+        // expired lease, without the admin email. Attempts stays incremented: it counts claims, as it does after a lease expires.
+        g.MapPost("/{id:long}/release", async (long id, ReleaseRequest req, HttpContext http, AppDbContext db, BlobContainerClient blobs, TimeProvider time) =>
+        {
+            var client = (BuildClient)http.Items[ClientItem]!;
+            var (job, _, error) = await ClaimedBuild(db, id, client);
+            if (job is null) return error!;
+
+            if ((await ReleaseClaimsAsync(db, blobs, time.GetUtcNow().UtcDateTime, client.Id, id)).Count == 0)
+                return Results.Problem(statusCode: 409, title: "Job changed concurrently (lease expired?)");
+            var reason = ReleasedPrefix + (string.IsNullOrWhiteSpace(req.Reason) ? "no reason given" : req.Reason.Trim());
+            if (reason.Length > 2000) reason = reason[..2000];
+            if (req.Log is not null) await SaveLog(blobs, job, req.Log);
+            // The release SQL changed the row version, so the tracked job cannot be saved; update the columns directly.
+            await db.Jobs.Where(j => j.Id == id).ExecuteUpdateAsync(s => s.SetProperty(j => j.FailureSummary, reason).SetProperty(j => j.HasLog, job.HasLog));
+            return Results.NoContent();
+        });
     }
 
     /// <summary>
@@ -288,10 +310,10 @@ public static partial class BuildClientApi
 
     /// <summary>
     /// Requeues InProgress jobs whose lease expired before <paramref name="now"/> (<paramref name="client"/> null) or that
-    /// <paramref name="client"/> holds (it is being deleted). Only the open build slot goes back: that build becomes Expired and its
-    /// staged blobs are deleted; completed builds keep counting. Returns the requeued job ids.
+    /// <paramref name="client"/> holds (it is being deleted, or releases <paramref name="job"/> when given). Only the open build slot goes
+    /// back: that build becomes Expired and its staged blobs are deleted; completed builds keep counting. Returns the requeued job ids.
     /// </summary>
-    public static async Task<List<long>> ReleaseClaimsAsync(AppDbContext db, BlobContainerClient blobs, DateTime now, Guid? client)
+    public static async Task<List<long>> ReleaseClaimsAsync(AppDbContext db, BlobContainerClient blobs, DateTime now, Guid? client, long? job = null)
     {
         var jobs = await db.Database.SqlQuery<long>($"""
             SET XACT_ABORT ON;
@@ -299,7 +321,8 @@ public static partial class BuildClientApi
             DECLARE @jobs TABLE (Id bigint);
             UPDATE Jobs SET Status = 'Queued', ClaimedByClientId = NULL, ClaimedAt = NULL, LeaseExpiresAt = NULL
             OUTPUT inserted.Id INTO @jobs
-            WHERE Status = 'InProgress' AND (({client} IS NULL AND LeaseExpiresAt < {now}) OR ClaimedByClientId = {client});
+            WHERE Status = 'InProgress' AND (({client} IS NULL AND LeaseExpiresAt < {now}) OR ClaimedByClientId = {client})
+              AND ({job} IS NULL OR Id = {job});
             UPDATE JobBuilds SET Status = 'Expired', CompletedAt = {now} WHERE Status = 'InProgress' AND JobId IN (SELECT Id FROM @jobs);
             COMMIT;
             SELECT Id AS Value FROM @jobs;
