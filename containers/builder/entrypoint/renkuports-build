@@ -33,6 +33,7 @@ GUEST_MB=${RENKUPORTS_GUEST_MB:-8192}
 ACCEL=${RENKUPORTS_ACCEL:-auto}
 GRACE=${RENKUPORTS_GRACE:-60}
 FRESH=${RENKUPORTS_FRESH:-0}
+guest_arch=	# set once by cmd_build; guest_poweroff reads it, also from the TERM/INT trap
 MANIFEST=${RENKUPORTS_IMAGES_MANIFEST:-$SHARE/images.json}
 
 check_env() {
@@ -185,15 +186,18 @@ qemu_running() { [ -n "${qemu_pid:-}" ] && kill -0 "$qemu_pid" 2> /dev/null; }
 qemu_wait_until() { while qemu_running && [ "$SECONDS" -lt "$1" ]; do sleep 1; done; ! qemu_running; }
 
 # ssh shutdown, then QMP system_powerdown, then QMP quit once RENKUPORTS_GRACE has passed.
+# arm64 skips system_powerdown: RenkuOS arm64 does not handle the ACPI power button.
 guest_poweroff() {
 	qemu_running || return 0
 	local deadline=$((SECONDS + GRACE))
 	log "shutting the guest down"
 	timeout 10 "${SSH[@]}" shutdown > /dev/null 2>&1
 	qemu_wait_until $((SECONDS + 20 < deadline ? SECONDS + 20 : deadline)) && return 0
-	qmp system_powerdown
-	qemu_wait_until "$deadline" && return 0
-	log "guest did not power off within ${GRACE}s, stopping QEMU"
+	if [ "$guest_arch" != arm64 ]; then
+		qmp system_powerdown
+		qemu_wait_until "$deadline" && return 0
+	fi
+	log "guest did not power off, stopping QEMU"
 	qmp quit
 	qemu_wait_until $((SECONDS + 5)) || kill -9 "$qemu_pid" 2> /dev/null
 	wait "$qemu_pid" 2> /dev/null
@@ -329,6 +333,7 @@ cmd_mock() {
 cmd_build() {
 	check_job_args "$@"
 	local arch=$1 port=$2 version=$3 accel base overlay=$CACHE/work/$1.qcow2 rc f
+	guest_arch=$arch
 	log "job ${RENKUPORTS_JOB_ID:-none}: $port $version for $arch (platform ${RENKUPORTS_PLATFORM:-unset})"
 	accel=$(accel_for "$arch") || exit $?
 	lock
@@ -387,7 +392,8 @@ cmd_build() {
 
 	local before after new=()
 	before=$(guest_packages) || die 3 "cannot list the guest's packages"
-	run ssh_g "haikuporter --config=\$HOME/config/settings/haikuports.conf -y --no-source-packages --no-git-repo --get-dependencies -j$JOBS $port-$version"
+	# Unbuffered, or Python holds its output back for minutes over a non-tty ssh.
+	run ssh_g "PYTHONUNBUFFERED=1 haikuporter --config=\$HOME/config/settings/haikuports.conf -y --no-source-packages --no-git-repo --get-dependencies -j$JOBS $port-$version"
 	rc=$?
 	[ $rc = 255 ] && die 3 "ssh to the guest failed during the build"
 	after=$(guest_packages) || die 3 "cannot list the guest's packages"
