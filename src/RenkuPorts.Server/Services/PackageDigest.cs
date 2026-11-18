@@ -12,8 +12,8 @@ namespace RenkuPorts.Server.Services;
 public record ListingEntry(string Path, string Record, string? Sha256, long Size);
 
 /// <summary>
-/// What a package's content digest is computed from: <see cref="Metadata"/> (<c>package list -i</c>, time fields dropped) and
-/// every entry. <see cref="Raw"/>: the file could not be read as a package (or the tools are missing), so it is compared as
+/// What a package's content digest is computed from: <see cref="Metadata"/> (<c>package list -i</c>, time and packager fields
+/// dropped) and every entry but the package-root <c>.PackageInfo</c>. <see cref="Raw"/>: the file could not be read as a package (or the tools are missing), so it is compared as
 /// one opaque file named after the package.
 /// </summary>
 public record PackageListing(string Metadata, List<ListingEntry> Entries, bool Raw);
@@ -34,8 +34,8 @@ public record BuildDiff(int AgainstBuild, bool TimestampLike, int FileCount, Lis
 /// The content digest that decides whether two builds match. HaikuPorter builds are not reproducible (every hpkg embeds file
 /// times), so it hashes what the package contains rather than its bytes:
 /// <list type="bullet">
-/// <item>the metadata <c>package list -i</c> prints (name, version, provides, requires, ...), minus any attribute whose key mentions a date or time;</item>
-/// <item>every entry of <c>package list -a</c> (path, type and permissions, size, symlink target, attribute names, types and sizes), its time column dropped;</item>
+/// <item>the metadata <c>package list -i</c> prints (name, version, provides, requires, ...), minus any attribute whose key mentions a date or time and the packager (it names the building client);</item>
+/// <item>every entry of <c>package list -a</c> (path, type and permissions, size, symlink target, attribute names, types and sizes), its time column dropped, except the package-root <c>.PackageInfo</c> (the same metadata, packager included);</item>
 /// <item>the SHA-256 of every regular file, extracted with <c>package extract</c>.</item>
 /// </list>
 /// The digest is the SHA-256 of that canonical text, entries sorted by path (ordinal).
@@ -91,6 +91,7 @@ public static partial class PackageDigest
         var hashed = new List<ListingEntry>(entries.Count);
         foreach (var e in entries)
         {
+            if (e.Path == ".PackageInfo") continue; // the metadata again, with the packager (the building client); Metadata covers it
             if (!e.Record.StartsWith('-')) { hashed.Add(e); continue; }
             var path = Path.Combine(extractDir, e.Path);
             if (!File.Exists(path)) return await RawAsync(hpkg, fileName, ct);
@@ -100,9 +101,12 @@ public static partial class PackageDigest
         return new(Metadata(info!), hashed, false);
     }
 
-    /// <summary>The attribute lines of <c>package list -i</c>, trimmed, without keys that mention a date or time.</summary>
+    /// <summary>
+    /// The attribute lines of <c>package list -i</c>, trimmed, without keys that mention a date or time and without the
+    /// packager, which names the client that built the package and so differs between otherwise identical builds.
+    /// </summary>
     public static string Metadata(string listInfo) => string.Join('\n', listInfo.Split('\n').Select(l => l.Trim())
-        .Where(l => l.Length > 0 && l != "package-attributes:" && !TimeKey().IsMatch(l)));
+        .Where(l => l.Length > 0 && l != "package-attributes:" && !TimeKey().IsMatch(l) && !PackagerKey().IsMatch(l)));
 
     /// <summary>
     /// Parses the entries of <c>package list -a</c> (lines after the tab-indented metadata): two spaces of indent per directory
@@ -246,6 +250,9 @@ public static partial class PackageDigest
 
     [GeneratedRegex(@"^[^:]*\b(date|time)\b[^:]*:", RegexOptions.IgnoreCase)]
     private static partial Regex TimeKey();
+
+    [GeneratedRegex(@"^packager\s*:", RegexOptions.IgnoreCase)]
+    private static partial Regex PackagerKey();
 
     [GeneratedRegex(@"^(?<indent> *)(?<name>\S.*?) +(?<size>\d+)  \d{4}-\d\d-\d\d \d\d:\d\d:\d\d  (?<perm>[-dlbcps][-rwxsStT]{9})(?:  -> (?<target>.*))?$")]
     private static partial Regex EntryLine();

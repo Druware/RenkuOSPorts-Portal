@@ -136,7 +136,7 @@ public sealed class BuildVerifier(IServiceScopeFactory scopes, BlobContainerClie
                 log.LogInformation("Job {Job}: build {Build} differs from the earlier builds; queued for another build", job.Id, latest.Number);
                 return;
             }
-            await Verification.FailAsync(db, blobs, job, $"Builds {string.Join(", ", done.Select(b => b.Number))} all differ.", now, users, notifier, logs);
+            await Verification.FailAsync(db, job, $"Builds {string.Join(", ", done.Select(b => b.Number))} all differ.", now, users, notifier, logs);
         }
         finally
         {
@@ -165,7 +165,7 @@ public sealed class BuildVerifier(IServiceScopeFactory scopes, BlobContainerClie
         UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs, CancellationToken ct)
     {
         if (await Verification.ApproveAsync(db, blobs, job, build, kind, by, reason, now, selfVerified) is { } conflict)
-            await Verification.FailAsync(db, blobs, job, conflict, now, users, notifier, logs);
+            await Verification.FailAsync(db, job, conflict, now, users, notifier, logs);
         else
         {
             indexer.MarkDirty(job.Platform);
@@ -237,15 +237,17 @@ public static class Verification
         return null;
     }
 
-    /// <summary>Fails the job, deletes the staged blobs of all its builds and emails the admins.</summary>
-    public static async Task FailAsync(AppDbContext db, BlobContainerClient blobs, Job job, string summary, DateTime now,
+    /// <summary>
+    /// Fails the job and emails the admins. The builds' staged blobs are kept, so an admin can still accept one of them
+    /// (approve endpoint); they are deleted when a build is accepted or the job is requeued.
+    /// </summary>
+    public static async Task FailAsync(AppDbContext db, Job job, string summary, DateTime now,
         UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs)
     {
         job.Status = JobStatus.Failed;
         job.FailureSummary = summary;
         job.CompletedAt = now;
         await db.SaveChangesAsync();
-        await DropBlobsAsync(db, blobs, await db.JobBuilds.Where(b => b.JobId == job.Id).Select(b => b.Id).ToListAsync());
         var name = await db.Recipes.Where(r => r.Id == job.RecipeId).Select(r => r.PortName + " " + r.Version).FirstAsync();
         await BuildClientApi.NotifyAdmins(users, notifier, logs, $"[RenkuPorts] {name} failed verification on {job.Platform}",
             $"Job {job.Id} ({name}, {job.Platform}): {summary}\n\nThe builds and their differences are on the Ports dashboard (Jobs).");

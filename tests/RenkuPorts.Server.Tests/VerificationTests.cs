@@ -142,12 +142,94 @@ public partial class ApiTests
         Assert.Empty(done.Packages);
         var mail = app.Mail.Sent.Skip(before).Single();
         Assert.Contains("failed verification", mail.Subject);
-        foreach (var b in new[] { "a", "bb", "ccc" }) Assert.False(await BlobExists($"arm64/{Sha(Bytes(b))}/{name}"));
+        // The staged builds are kept, so an admin can still accept one.
+        foreach (var b in new[] { "a", "bb", "ccc" }) Assert.True(await BlobExists($"arm64/{Sha(Bytes(b))}/{name}"));
         Assert.Equal(HttpStatusCode.NotFound, (await app.CreateClient().GetAsync($"/repo/arm64/packages/{name}")).StatusCode);
 
-        // Requeued, it starts over: the three builds no longer count.
+        // Requeued, it starts over: the three builds no longer count and their blobs are deleted.
         Assert.Equal(HttpStatusCode.OK, (await admin.PostAsync($"/api/jobs/{job.Id}/requeue", null)).StatusCode);
         Assert.All((await VerifiedJobAsync(job.Id)).Builds, b => Assert.Equal("Discarded", b.Status));
+        foreach (var b in new[] { "a", "bb", "ccc" }) Assert.False(await BlobExists($"arm64/{Sha(Bytes(b))}/{name}"));
+    }
+
+    [Fact]
+    public async Task An_admin_accepts_a_build_of_a_job_that_failed_verification_and_the_others_are_deleted()
+    {
+        var admin = await app.SignedInAsync();
+        var clients = new List<HttpClient>();
+        for (var i = 0; i < 3; i++) clients.Add((await app.BuildClientAsync(admin)).Http);
+        var job = await QueueAsync(admin, "zlib");
+        var name = Hpkg("zlib");
+        await BuildOnceAsync(clients[0], name, Bytes("a"));
+        await BuildOnceAsync(clients[1], name, Bytes("bb"));
+        var failed = await BuildOnceAsync(clients[2], name, Bytes("ccc"));
+        Assert.Equal("Failed", failed.Status);
+
+        var ok = await admin.PostAsJsonAsync($"/api/jobs/{job.Id}/approve", new { buildId = failed.Builds[1].Id, reason = "build 2 is the release toolchain" });
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        var done = (await ok.Content.ReadFromJsonAsync<VerifiedJob>())!;
+        Assert.Equal(("Succeeded", "Override", AppFactory.AdminEmail, failed.Builds[1].Id, false, null),
+            (done.Status, done.Approval, done.ApprovedBy, done.ApprovedBuildId, done.SelfVerified, done.FailureSummary));
+        Assert.Equal([name], done.Packages);
+        Assert.Equal(Bytes("bb"), await app.CreateClient().GetByteArrayAsync($"/repo/arm64/packages/{name}"));
+        Assert.False(await BlobExists($"arm64/{Sha(Bytes("a"))}/{name}"));
+        Assert.False(await BlobExists($"arm64/{Sha(Bytes("ccc"))}/{name}"));
+        Assert.Equal("override", Assert.Single((await app.CreateClient().GetFromJsonAsync<PageView<VerifiedPackage>>("/api/repo/arm64/packages"))!.Items).Verification);
+        // Published: a second acceptance is refused.
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/jobs/{job.Id}/approve", new { buildId = failed.Builds[0].Id, reason = "again" })).StatusCode);
+    }
+
+    [Fact]
+    public async Task An_admin_accepts_the_only_build_and_the_open_second_build_is_discarded()
+    {
+        var admin = await app.SignedInAsync();
+        var (_, c1) = await app.BuildClientAsync(admin);
+        var (_, c2) = await app.BuildClientAsync(admin);
+        var job = await QueueAsync(admin, "zlib");
+        var name = Hpkg("zlib");
+        var first = await BuildOnceAsync(c1, name, Bytes("first"));
+        Assert.Equal("Queued", first.Status);
+        // The second build is under way and has uploaded something when the admin accepts the first.
+        Assert.Equal(job.Id, (await ClaimAsync(c2)).JobId);
+        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(c2, job.Id, name, Bytes("second"))).StatusCode);
+
+        var ok = await admin.PostAsJsonAsync($"/api/jobs/{job.Id}/approve", new { buildId = first.Builds[0].Id, reason = "urgent fix, single build" });
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        var done = (await ok.Content.ReadFromJsonAsync<VerifiedJob>())!;
+        Assert.Equal(("Succeeded", "Override", first.Builds[0].Id), (done.Status, done.Approval, done.ApprovedBuildId));
+        Assert.Equal(["Completed", "Discarded"], done.Builds.Select(b => b.Status));
+        Assert.False(await BlobExists($"arm64/{Sha(Bytes("second"))}/{name}"));
+
+        // The second build can no longer upload or complete, and nothing more is claimable.
+        Assert.Equal(HttpStatusCode.Conflict, (await UploadAsync(c2, job.Id, name, Bytes("second"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await c2.PostAsJsonAsync($"/api/client/jobs/{job.Id}/complete", new { log = "" })).StatusCode);
+        await app.VerifyAsync();
+        Assert.Equal(HttpStatusCode.NoContent, await TryClaimAsync((await app.BuildClientAsync(admin)).Http));
+        Assert.Equal(Bytes("first"), await app.CreateClient().GetByteArrayAsync($"/repo/arm64/packages/{name}"));
+        Assert.Equal("Succeeded", (await VerifiedJobAsync(job.Id)).Status);
+    }
+
+    [Fact]
+    public async Task Accepting_a_build_is_refused_without_a_reason_for_another_jobs_build_or_once_its_packages_are_gone()
+    {
+        var admin = await app.SignedInAsync();
+        var (_, c1) = await app.BuildClientAsync(admin);
+        var (_, c2) = await app.BuildClientAsync(admin);
+        var zlib = await QueueAsync(admin, "zlib");
+        var waiting = await BuildOnceAsync(c1, Hpkg("zlib"), Bytes("z"), took: TimeSpan.FromHours(1)); // c1 cannot take zlib's second build
+        var foo = await QueueAsync(admin, "foo");
+        var fooBuilt = await BuildOnceAsync(c1, Hpkg("foo"), Bytes("f"), expect: foo.Id);
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync($"/api/jobs/{zlib.Id}/approve", new { buildId = waiting.Builds[0].Id })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync($"/api/jobs/{zlib.Id}/approve", new { buildId = fooBuilt.Builds[0].Id, reason = "x" })).StatusCode);
+
+        // A failed second build (either job) fails the job and deletes its staged packages: the first build can no longer be published.
+        var claimed = await ClaimAsync(c2);
+        Assert.Equal(HttpStatusCode.OK, (await c2.PostAsJsonAsync($"/api/client/jobs/{claimed.JobId}/fail", new { summary = "boom" })).StatusCode);
+        var gone = await VerifiedJobAsync(claimed.JobId);
+        Assert.Equal("Failed", gone.Status);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsJsonAsync($"/api/jobs/{gone.Id}/approve", new { buildId = gone.Builds[0].Id, reason = "x" })).StatusCode);
+        Assert.Equal("Failed", (await VerifiedJobAsync(gone.Id)).Status);
     }
 
     [Fact]

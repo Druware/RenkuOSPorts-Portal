@@ -163,24 +163,32 @@ public static class AdminEndpoints
                 j.CompletedAt = DateTime.UtcNow;
             }, () => Verification.DiscardBuildsAsync(db, blobs, id)));
 
-        // "Approve anyway" for builds that differ only in timestamp-like bytes: publishes the chosen build, recording who, when and why.
+        // "Approve anyway": publishes any completed build of an unpublished job, recording who, when and why. For a job awaiting an
+        // override (timestamp-only differences), one that failed verification (all builds differ) or one with a completed build still
+        // waiting for its next build; an open next build is discarded, so its client can no longer upload or complete it.
         // embedsDates flags the port, so its later timestamp-only mismatches are approved automatically.
         g.MapPost("/jobs/{id:long}/approve", async (long id, ApproveRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs,
             RepoIndexer indexer, PriorityComputer priorities, TimeProvider time, ILoggerFactory logs) =>
         {
             var job = await db.Jobs.Include(j => j.Recipe).Include(j => j.Builds).ThenInclude(b => b.Packages).FirstOrDefaultAsync(j => j.Id == id);
             if (job is null) return Results.NotFound();
-            if (job.Status != JobStatus.AwaitingOverride)
-                return Results.Problem(statusCode: 409, title: $"Job is {job.Status}", detail: "Only a job awaiting an override can be approved.");
+            if (job.Status is not (JobStatus.Queued or JobStatus.InProgress or JobStatus.AwaitingOverride or JobStatus.Failed))
+                return Results.Problem(statusCode: 409, title: $"Job is {job.Status}", detail: "Only an unpublished job that is queued, building, awaiting an override or failed can be approved.");
             var reason = req.Reason?.Trim();
             if (string.IsNullOrEmpty(reason) || reason.Length > 1000)
                 return Results.ValidationProblem(new Dictionary<string, string[]> { ["reason"] = ["A reason is required (at most 1000 characters)."] });
             if (job.Builds.FirstOrDefault(b => b.Id == req.BuildId && b.Status == JobBuildStatus.Completed) is not { } build)
                 return Results.ValidationProblem(new Dictionary<string, string[]> { ["buildId"] = ["One of the job's completed builds."] });
+            if (build.Packages.Any(p => !p.Extra && p.BlobName == ""))
+                return Results.Problem(statusCode: 409, title: "Build no longer staged", detail: $"The packages of build {build.Number} were deleted; it cannot be published.");
             var by = user.Identity?.Name ?? "admin";
             var now = time.GetUtcNow().UtcDateTime;
+            var was = job.Status;
             if (req.EmbedsDates && !await db.DateEmbeddingPorts.AnyAsync(d => d.PortName == job.Recipe!.PortName))
                 db.DateEmbeddingPorts.Add(new DateEmbeddingPort { PortName = job.Recipe!.PortName, SetBy = by, SetAt = now, Reason = reason });
+            // Saved with the approval (the row version guards it): a claim or completion racing in makes it a 409.
+            foreach (var open in job.Builds.Where(b => b.Status == JobBuildStatus.InProgress)) open.Status = JobBuildStatus.Discarded;
+            (job.ClaimedByClientId, job.ClaimedAt, job.LeaseExpiresAt, job.FailureSummary) = (null, null, null, null);
             try
             {
                 if (await Verification.ApproveAsync(db, blobs, job, build, "Override", by, reason, now) is { } conflict)
@@ -192,8 +200,8 @@ public static class AdminEndpoints
             }
             indexer.MarkDirty(job.Platform);
             priorities.MarkDirty();
-            logs.CreateLogger("AdminEndpoints").LogInformation("{User} approved build {Build} of job {Job} despite differing builds: {Reason} (embeds dates: {Flag})",
-                by, build.Number, id, reason, req.EmbedsDates);
+            logs.CreateLogger("AdminEndpoints").LogInformation("{User} approved build {Build} of job {Job} ({Status}) without matching builds: {Reason} (embeds dates: {Flag})",
+                by, build.Number, id, was, reason, req.EmbedsDates);
             return Results.Ok(await db.Jobs.Where(j => j.Id == id).Select(Project.Job).FirstAsync());
         });
 

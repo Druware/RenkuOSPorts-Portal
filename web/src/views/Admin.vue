@@ -50,13 +50,27 @@ async function jobAction(job, action) {
   } catch (e) { fail(e) }
 }
 
-// ---- Build verification: approve a timestamp-only mismatch, clear a port's embeds-dates flag ----
+// ---- Build verification: accept a build without a match, clear a port's embeds-dates flag ----
 const approveForms = reactive({}) // job id -> { buildId, reason, embedsDates }
+/** Completed builds whose packages are still stored: the ones an admin can accept. */
+const acceptableBuilds = (j) => (j.builds || []).filter((b) => b.status === 'Completed' && b.packages.every((p) => p.extra || p.staged))
+/** Not published yet and not mid-verification, with a build to accept (awaiting override, failed verification, waiting for its next build). */
+const acceptable = (j) => ['Queued', 'InProgress', 'AwaitingOverride', 'Failed'].includes(j.status) && acceptableBuilds(j).length > 0
 function approveForm(j) {
-  return (approveForms[j.id] ??= { buildId: j.builds.filter((b) => b.status === 'Completed').at(-1)?.id, reason: '', embedsDates: false })
+  return (approveForms[j.id] ??= { buildId: acceptableBuilds(j).at(-1)?.id, reason: '', embedsDates: false })
 }
-/** The job's builds differ only in timestamp-like bytes (the server offers no override otherwise). */
+/** The job's builds differ only in timestamp-like bytes: the embeds-dates flag is offered. */
 const timestampOnly = (j) => j.status === 'AwaitingOverride' && j.builds.some((b) => b.diffs?.some((d) => d.timestampLike))
+function acceptLegend(j) {
+  if (timestampOnly(j)) return 'Approve anyway: the builds differ only in what looks like embedded dates or times'
+  if (j.status === 'Failed') return 'Accept a build anyway: the builds all differ (see the differences above)'
+  return 'Accept a build without waiting for a matching one: the next build is cancelled'
+}
+/** Opens the Jobs tab filtered to <status>. */
+function showJobs(status) {
+  Object.assign(filter, { status, platform: '' })
+  tab.value = 'jobs'
+}
 const duration = (b) => (b.completedAt ? `${Math.round((new Date(b.completedAt) - new Date(b.claimedAt)) / 60000)} min` : '')
 function matchState(j, b) {
   if (b.status !== 'Completed' || !b.digest) return ''
@@ -286,7 +300,7 @@ watch(tab, (t) => {
           </tbody>
         </table>
       </div>
-      <p class="muted small">Every build is built twice, by different clients where possible, and published only when both have the same contents. Jobs awaiting an override are on the Jobs tab. Refreshes every 15 seconds.</p>
+      <p class="muted small">Every build is built twice, by different clients where possible, and published only when both have the same contents. Jobs awaiting an override, and failed or single-build jobs whose builds an admin can accept, are on the Jobs tab. Refreshes every 15 seconds.</p>
     </HaikuWindow>
 
     <HaikuWindow title="Recent failures">
@@ -297,6 +311,7 @@ watch(tab, (t) => {
             <strong>{{ j.portName }}-{{ j.version }}</strong>
             <span class="pill">{{ j.platform }}</span>
             <span class="muted small">{{ formatDate(j.completedAt) }} · attempt {{ j.attempts }}</span>
+            <button v-if="acceptable(j)" type="button" class="btn btn-small" @click="showJobs('Failed')">Accept a build…</button>
             <button type="button" class="btn btn-small" @click="jobAction(j, 'requeue')">Requeue</button>
           </div>
           <p v-if="j.failureSummary" class="summary">{{ j.failureSummary }}</p>
@@ -391,16 +406,16 @@ watch(tab, (t) => {
               </details>
             </li>
           </ul>
-          <form v-if="timestampOnly(j)" class="form" @submit.prevent="approve(j)">
+          <form v-if="acceptable(j)" class="form" @submit.prevent="approve(j)">
             <fieldset>
-              <legend>Approve anyway: the builds differ only in what looks like embedded dates or times</legend>
-              <label v-for="b in j.builds.filter((b) => b.status === 'Completed')" :key="b.id" class="check">
+              <legend>{{ acceptLegend(j) }}</legend>
+              <label v-for="b in acceptableBuilds(j)" :key="b.id" class="check">
                 <input v-model="approveForm(j).buildId" type="radio" :name="`ap-${j.id}`" :value="b.id" /> Publish build {{ b.number }} ({{ b.clientName }})
               </label>
             </fieldset>
             <label :for="`ap-reason-${j.id}`">Reason (required)</label>
             <input :id="`ap-reason-${j.id}`" v-model.trim="approveForm(j).reason" type="text" required maxlength="1000" autocomplete="off" />
-            <label class="check"><input v-model="approveForm(j).embedsDates" type="checkbox" /> This port embeds dates: approve its future timestamp-only differences automatically</label>
+            <label v-if="timestampOnly(j)" class="check"><input v-model="approveForm(j).embedsDates" type="checkbox" /> This port embeds dates: approve its future timestamp-only differences automatically</label>
             <button class="btn btn-primary" type="submit" :disabled="!approveForm(j).reason || !approveForm(j).buildId">Approve anyway</button>
           </form>
           <div v-if="j.packages?.length > 3">

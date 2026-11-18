@@ -24,8 +24,11 @@ public record JobBuildDto(long Id, int Number, string ClientName, JobBuildStatus
     public List<BuildDiff>? Diffs => DiffJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<List<BuildDiff>>(DiffJson, PackageDigest.Json);
 }
 
-/// <summary>A package a build uploaded; <see cref="Extra"/>: of another port, recorded but not published.</summary>
-public record BuildPackageDto(string FileName, long Size, string Sha256, bool Extra, string? Digest);
+/// <summary>
+/// A package a build uploaded; <see cref="Extra"/>: of another port, recorded but not published. <see cref="Staged"/>: its bytes are
+/// still stored, so the build can be approved (false for extras and once the build lost, was discarded or failed).
+/// </summary>
+public record BuildPackageDto(string FileName, long Size, string Sha256, bool Extra, string? Digest, bool Staged);
 
 /// <summary>
 /// A job as a build client sees it: no owner emails or user ids, no log. <see cref="Mine"/>: claimed by the calling client;
@@ -87,7 +90,7 @@ public static class Project
         j.Status, j.QueuedAt, j.QueuedBy == null ? "auto-update" : j.QueuedBy.DisplayName, j.ClaimedBy == null ? null : j.ClaimedBy.Name, j.ClaimedAt, j.LeaseExpiresAt,
         j.CompletedAt, j.Attempts, j.FailureSummary, j.HasLog, j.Packages.Select(p => p.FileName).ToList(),
         j.Builds.OrderBy(b => b.Number).Select(b => new JobBuildDto(b.Id, b.Number, b.ClientName, b.Status, b.ClaimedAt, b.CompletedAt, b.ExclusiveUntil,
-            b.Digest, b.DiffJson, b.Packages.OrderBy(p => p.FileName).Select(p => new BuildPackageDto(p.FileName, p.Size, p.Sha256, p.Extra, p.Digest)).ToList())).ToList(),
+            b.Digest, b.DiffJson, b.Packages.OrderBy(p => p.FileName).Select(p => new BuildPackageDto(p.FileName, p.Size, p.Sha256, p.Extra, p.Digest, p.BlobName != "")).ToList())).ToList(),
         j.ApprovedBuildId, j.Approval, j.ApprovedBy, j.ApprovedAt, j.ApprovalReason, j.SelfVerified);
 
     public static readonly Expression<Func<BuildClient, ClientDto>> Client = c => new ClientDto(c.Id, c.Name, c.Platform,

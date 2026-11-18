@@ -56,6 +56,7 @@ public class PackageDigestTests
         	summary: A fast hash
         	build date: 2026-11-17 22:48:36
         	version: 0.8.3-1
+        	packager: RenkuPorts Builder vm1 <noreply@renkuos.org>
         	provides: xxhash = 0.8.3
         bin                                      0  2026-11-17 22:48:36  drwxr-xr-x
           <BEOS:TYPE                            31  'MIMS'>
@@ -84,6 +85,15 @@ public class PackageDigestTests
         Assert.Null(PackageDigest.ParseContents("garbage line\n"));
     }
 
+    [Fact]
+    public void Metadata_drops_the_packager_which_names_the_building_client()
+    {
+        var info = ListA.Split("bin ")[0];
+        Assert.Equal(PackageDigest.Metadata(info), PackageDigest.Metadata(info.Replace("Builder vm1", "Builder box50")));
+        Assert.DoesNotContain("packager", PackageDigest.Metadata(info));
+        Assert.NotEqual(PackageDigest.Metadata(info), PackageDigest.Metadata(info.Replace("0.8.3-1", "0.8.3-2")));
+    }
+
     /// <summary>Real packages made with <c>package create</c>: the digest ignores file times and nothing else.</summary>
     [HaikuToolsFact]
     public async Task Digest_of_real_packages_ignores_times_and_catches_content_mode_file_and_metadata_changes()
@@ -91,7 +101,7 @@ public class PackageDigestTests
         var tools = new HaikuTools(HaikuToolsFactAttribute.ToolsDir);
         var work = Directory.CreateTempSubdirectory("digest-").FullName;
         var n = 0;
-        async Task<(string Digest, PackageListing Listing, string Dir, string File)> Make(Action<string>? change = null, string summary = "Test", DateTime? mtime = null)
+        async Task<(string Digest, PackageListing Listing, string Dir, string File)> Make(Action<string>? change = null, string summary = "Test", DateTime? mtime = null, string packager = "test")
         {
             var src = Path.Combine(work, $"src{++n}");
             Directory.CreateDirectory(Path.Combine(src, "bin"));
@@ -108,7 +118,7 @@ public class PackageDigestTests
                 architecture arm64
                 summary "{{summary}}"
                 description "Test package"
-                packager "test <test@example.invalid>"
+                packager "{{packager}} <test@example.invalid>"
                 vendor "Haiku Project"
                 copyrights "2026 test"
                 licenses "MIT"
@@ -128,6 +138,9 @@ public class PackageDigestTests
         Assert.NotEqual(await File.ReadAllBytesAsync(a.File), await File.ReadAllBytesAsync(later.File)); // the hpkgs differ...
         Assert.Equal(a.Digest, later.Digest);                                                           // ...their content does not
         Assert.Contains(a.Listing.Entries, e => e.Path == "lib/link" && e.Record.Contains("-> ../bin/hi"));
+        var otherClient = await Make(packager: "RenkuPorts Builder box50");
+        Assert.Equal(a.Digest, otherClient.Digest); // the packager names the building client, so it is not content
+        Assert.DoesNotContain(a.Listing.Entries, e => e.Path == ".PackageInfo");
 
         var bytes = await Make(src => File.WriteAllText(Path.Combine(src, "bin", "hi"), "hellp\n"));
         var mode = await Make(src => File.SetUnixFileMode(Path.Combine(src, "bin", "hi"), (UnixFileMode)0b110_100_100));
