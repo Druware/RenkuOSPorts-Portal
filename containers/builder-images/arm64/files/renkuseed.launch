@@ -1,0 +1,4 @@
+job x-vnd.RenkuPorts-renkuseed {
+	launch /bin/sh /boot/system/non-packaged/bin/renkuseed
+	on initial_volumes_mounted
+}

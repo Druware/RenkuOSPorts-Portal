@@ -55,7 +55,7 @@ A guest image in the manifest must:
 | 3 | infrastructure failure (riscv64, KVM requested but absent, clone failed, guest did not boot, ssh lost, QEMU crash); the last 100 serial log lines are appended once QEMU has started |
 | 4 | the cache volume is busy (another container holds `/cache/build.lock`) |
 | 5 | guest image missing, download failed or SHA-256 mismatch |
-| 75 | stopped by SIGTERM/SIGINT after shutting the guest down (ssh `shutdown`, QMP `system_powerdown`, QMP `quit` after `RENKUPORTS_GRACE` seconds) |
+| 75 | stopped by SIGTERM/SIGINT after shutting the guest down (ssh `shutdown`, QMP `system_powerdown`, QMP `quit` after `RENKUPORTS_GRACE` seconds; arm64 skips `system_powerdown` and quits once the wait after ssh `shutdown` (20 s, or the grace if shorter) has passed, because RenkuOS arm64 does not handle the ACPI power button) |
 
 ## Tests
 

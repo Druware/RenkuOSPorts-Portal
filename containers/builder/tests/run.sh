@@ -134,6 +134,21 @@ docker logs "$job" > "$tmp/log" 2>&1
 [ "$code" = 75 ] && grep -q "stopping QEMU" "$tmp/log" && pass "stop with a running guest exits 75" || fail "stop with a running guest (exit $code)"
 docker rm "$job" > /dev/null
 
+echo "# build with stub ssh and socat that record their commands (QEMU boots the blank disk)"
+mkdir -p "$tmp/img/bin"
+printf '#!/bin/sh\necho "$*" >> /t/ssh.log\ncat > /dev/null\n' > "$tmp/img/bin/ssh"
+printf '#!/bin/sh\ncat >> /t/qmp.log\n' > "$tmp/img/bin/socat"
+chmod 755 "$tmp/img/bin/ssh" "$tmp/img/bin/socat"
+docker run --rm --init -v "$vol2:/cache" -v "$tmp/out:/out" -v "$tmp/img:/t" -e PATH=/t/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin -e RENKUPORTS_IMAGES_MANIFEST=/t/boot.json \
+	-e RENKUPORTS_PORTS_URL=file:///t/ports -e RENKUPORTS_GRACE=2 -e RENKUPORTS_GUEST_MB=256 -e RENKUPORTS_ACCEL=tcg \
+	"$IMG" build arm64 foo 1.0 > "$tmp/log" 2>&1
+code=$?
+[ "$code" = 1 ] && grep -q "produced no package" "$tmp/log" && pass "stub build exits 1 without a package" || fail "stub build (exit $code)"
+grep -q "PYTHONUNBUFFERED=1 haikuporter " "$tmp/img/ssh.log" && pass "haikuporter runs with PYTHONUNBUFFERED=1" \
+	|| fail "haikuporter runs with PYTHONUNBUFFERED=1"
+grep -q '"quit"' "$tmp/img/qmp.log" && ! grep -q system_powerdown "$tmp/img/qmp.log" \
+	&& pass "arm64 power-off sends QMP quit, not system_powerdown" || fail "arm64 power-off sends QMP quit, not system_powerdown"
+
 echo "# QEMU argv"
 for a in arm64 x86_64 x86; do
 	for c in kvm tcg; do
