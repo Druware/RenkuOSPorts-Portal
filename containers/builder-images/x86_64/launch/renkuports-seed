@@ -1,0 +1,4 @@
+# launch_daemon job: install the builder container's ssh key from the RENKUSEED disk at every boot.
+job x-vnd.RenkuPorts-seed {
+	launch /bin/sh /boot/system/non-packaged/bin/install-seed-key
+}

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Copies authorized_keys from the read-only FAT volume RENKUSEED (made by containers/builder's entrypoint)
+# to user's sshd key file, then unmounts it. Run at boot by the launch job launch/renkuports-seed.
+dir=/boot/home/config/settings/ssh
+log=/boot/system/var/log/renkuports-seed.log
+i=0
+while :; do
+	# mountvolume mounts at /<volume name>; the FAT driver may report the label in either case.
+	for name in RENKUSEED renkuseed; do
+		mountvolume -s -ro "$name"
+		[ -f "/$name/authorized_keys" ] && break 2
+	done
+	i=$((i + 1))
+	[ $i -ge 60 ] && { echo "$(date): no RENKUSEED volume with authorized_keys" >> "$log"; exit 1; }
+	sleep 1
+done
+mkdir -p "$dir" && chmod 700 "$dir" \
+	&& cp "/$name/authorized_keys" "$dir/authorized_keys.new" && chmod 600 "$dir/authorized_keys.new" \
+	&& mv "$dir/authorized_keys.new" "$dir/authorized_keys" && rc=0 || rc=1
+mountvolume -s -u "$name"
+echo "$(date): installed authorized_keys from /$name (status $rc)" >> "$log"
+exit $rc

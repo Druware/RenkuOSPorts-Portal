@@ -1,0 +1,30 @@
+# UserBuildConfig for the x86_64 RenkuPorts builder image (profile @nightly-raw).
+# build-image.sh copies it into generated.x86_64, which jam reads after build/jam/UserBuildConfig.
+
+# 40 GiB, created sparse (ftruncate) instead of zero-filled.
+HAIKU_IMAGE_SIZE = 40960 ;
+HAIKU_DONT_CLEAR_IMAGE = 1 ;
+
+# Activated, not left in _packages_ as the nightly's Development optional packages do; those are suppressed, since
+# haiku_devel both there and in system/packages makes jam's dependency check fail.
+SuppressOptionalHaikuImagePackages Development DevelopmentBase DevelopmentMin ;
+# All are in build/jam/repositories/HaikuPorts/x86_64; jam adds their dependencies. libtool is not here: its
+# libtool_libltdl is missing from that list, so provision.sh installs it with pkgman.
+AddHaikuImageSystemPackages
+	haikuporter python3.14 git ca_root_certificates
+	gcc binutils gmp mpc mpfr make mkdepend jam nasm
+	autoconf automake pkgconfig m4 bison flex texinfo gettext perl patch
+	coreutils diffutils findutils gawk grep sed tar
+	bzip2 xz_utils zstd unzip zip curl wget
+	;
+AddPackageFilesToHaikuImage system packages : haiku_devel.hpkg makefile_engine.hpkg : nameFromMetaInfo ;
+
+# Seed-disk ssh key installer (containers/builder README, "Builder image requirements").
+AddFilesToHaikuImage system non-packaged bin : /tooling/install-seed-key ;
+AddFilesToHaikuImage system settings launch : /tooling/launch/renkuports-seed ;
+
+# The container attaches its disks as virtio-blk-pci, but build/jam/packages/Haiku ships virtio_block only on arm, arm64
+# and riscv64. Add the x86_64 build of it as a boot module. Not under system/non-packaged: the loader opens system/...
+# paths inside the haiku package, so only home/config/non-packaged/add-ons/kernel/boot is read from the BFS volume.
+AddFilesToHaikuImage home config non-packaged add-ons kernel drivers disk virtual : virtio_block ;
+AddSymlinkToHaikuImage home config non-packaged add-ons kernel boot : ../drivers/disk/virtual/virtio_block ;
