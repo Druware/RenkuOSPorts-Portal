@@ -59,7 +59,8 @@ public static class RecipeScanner
         }
     }
 
-    private static async Task GitAsync(string? dir, params string[] args)
+    /// <summary>Runs git (any repository owner allowed) and returns its standard output; throws on a non-zero exit.</summary>
+    public static async Task<string> GitAsync(string? dir, params string[] args)
     {
         var psi = new ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true };
         psi.ArgumentList.Add("-c");
@@ -70,8 +71,8 @@ public static class RecipeScanner
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = await p.StandardError.ReadToEndAsync();
         await p.WaitForExitAsync();
-        await stdout;
         if (p.ExitCode != 0) throw new InvalidOperationException($"git {args[0]} failed ({p.ExitCode}): {stderr.Trim()}");
+        return await stdout;
     }
 
     /// <summary>Last commit date of every recipe path, from one <c>git log</c> walk (newest first, so the first hit wins). Empty if git is unavailable.</summary>

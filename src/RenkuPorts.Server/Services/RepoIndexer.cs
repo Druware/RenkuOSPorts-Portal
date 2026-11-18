@@ -186,13 +186,19 @@ public sealed class RepoIndexer(IServiceScopeFactory scopes, BlobContainerClient
         } while (await timer.WaitForNextTickAsync(stop));
     }
 
+    /// <summary>
+    /// The published packages a build starts from, read fresh from the database. The index holds exactly the selection of
+    /// these (<c>package_repo update -t</c> writes only the listed names), so a deleted package drops out of the next build.
+    /// </summary>
+    public static Task<List<IndexCandidate>> CandidatesAsync(AppDbContext db, string platform, CancellationToken ct = default) =>
+        PublicEndpoints.Published(db).Where(p => p.Platform == platform).Select(p => new IndexCandidate(p.FileName, p.Sha256, p.BlobName)).ToListAsync(ct);
+
     /// <summary>Rebuilds one platform's index if its inputs changed (always with <paramref name="force"/>). False if another instance holds the lock.</summary>
     public async Task<bool> BuildAsync(string platform, bool force, CancellationToken ct)
     {
         List<IndexCandidate> published;
         using (var scope = scopes.CreateScope())
-            published = await PublicEndpoints.Published(scope.ServiceProvider.GetRequiredService<AppDbContext>())
-                .Where(p => p.Platform == platform).Select(p => new IndexCandidate(p.FileName, p.Sha256, p.BlobName)).ToListAsync(ct);
+            published = await CandidatesAsync(scope.ServiceProvider.GetRequiredService<AppDbContext>(), platform, ct);
 
         var lockBlob = blobs.GetBlobClient(IndexBlob(platform, "lock"));
         try { await lockBlob.UploadAsync(BinaryData.Empty, new BlobUploadOptions { Conditions = new() { IfNoneMatch = ETag.All } }, ct); }

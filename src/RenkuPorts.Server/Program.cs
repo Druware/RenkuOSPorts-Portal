@@ -66,6 +66,8 @@ builder.Services.AddSingleton<INotifier>(sp => cfg["Email:Mode"] == "AzureCommun
 builder.Services.AddSingleton<RepoIndexer>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RepoIndexer>());
 builder.Services.AddSingleton<RepoImporter>();
+builder.Services.AddSingleton<AutoUpdater>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AutoUpdater>());
 
 builder.Services.Configure<FormOptions>(o => o.ValueLengthLimit = 16 << 20);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));

@@ -67,6 +67,7 @@ public class AppFactory : WebApplicationFactory<Program>
         b.UseSetting("Seed:AdminEmail", AdminEmail);
         b.UseSetting("Seed:AdminPassword", AdminPassword);
         b.UseSetting("PortsTree:Path", PortsTree);
+        b.UseSetting("AutoUpdate:Schedule", "false");
         b.UseWebRoot(_webRoot);
         b.ConfigureServices(s =>
         {

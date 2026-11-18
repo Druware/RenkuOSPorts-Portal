@@ -224,6 +224,49 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.ToTable("AspNetUsers", (string)null);
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.AutoUpdateSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("IntervalHours")
+                        .HasColumnType("int");
+
+                    b.Property<string>("LastCommit")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("LastResultJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("LastRunAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Platforms")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime?>("RunningSince")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("AutoUpdateSettings");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Enabled = false,
+                            IntervalHours = 6,
+                            Platforms = "arm64"
+                        });
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.BuildClient", b =>
                 {
                     b.Property<Guid>("Id")
@@ -375,7 +418,6 @@ namespace RenkuPorts.Server.Data.Migrations
                         .HasColumnType("datetime2");
 
                     b.Property<string>("QueuedByUserId")
-                        .IsRequired()
                         .HasColumnType("nvarchar(450)");
 
                     b.Property<int>("RecipeId")
@@ -630,8 +672,7 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.HasOne("RenkuPorts.Server.Data.AppUser", "QueuedBy")
                         .WithMany()
                         .HasForeignKey("QueuedByUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("RenkuPorts.Server.Data.Recipe", "Recipe")
                         .WithMany()

@@ -124,6 +124,13 @@ public class RepoIndexTests
         File.WriteAllLines(list, real);
         await tools.UpdateAsync(Path.Combine(first, "repo"), second, list, pkgs, default);
         Assert.Equal(real.Order(), (await tools.ListAsync(Path.Combine(second, "repo"), default)).Order());
+
+        // A name left out of the list (a deleted package) is dropped, though the old repo still has it.
+        var third = Directory.CreateDirectory(Path.Combine(work, "third")).FullName;
+        File.WriteAllText(Path.Combine(third, "repo.info"), info);
+        File.WriteAllLines(list, real[1..]);
+        await tools.UpdateAsync(Path.Combine(second, "repo"), third, list, pkgs, default);
+        Assert.Equal(real[1..].Order(), (await tools.ListAsync(Path.Combine(third, "repo"), default)).Order());
         Directory.Delete(work, true);
     }
 }

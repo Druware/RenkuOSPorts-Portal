@@ -29,11 +29,20 @@ const jobs = [
   job(3, 'vim', '9.1.0', 'x86_64', 'Succeeded', { claimedBy: 'ci-x64', completedAt: ago(5), attempts: 1, hasLog: true, packages: ['vim-9.1.0-1-x86_64.hpkg'] }),
   job(4, 'curl', '8.9.1', 'x86', 'Queued'),
   job(5, 'sqlite', '3.46.0', 'arm64', 'Failed', { attempts: 1, completedAt: ago(8), hasLog: true, failureSummary: 'patch does not apply: sqlite-3.46.0.patchset' }),
+  job(6, 'qt6_base', '6.7.2', 'arm64', 'Succeeded', { claimedBy: 'garage-rpi5', completedAt: ago(9), attempts: 1, hasLog: true,
+    packages: ['qt6_base-6.7.2-1-arm64.hpkg', 'qt6_base_devel-6.7.2-1-arm64.hpkg', 'qt6_base_tools-6.7.2-1-arm64.hpkg', 'qt6_base_debuginfo-6.7.2-1-arm64.hpkg', 'qt6_base_source-6.7.2-1-source.hpkg'] }),
 ]
 
 const send = (res, status, body, type = 'application/json') => {
   res.writeHead(status, { 'Content-Type': type })
   res.end(body === undefined ? '' : typeof body === 'string' ? body : JSON.stringify(body))
+}
+const autoUpdate = { enabled: false, intervalHours: 6, platforms: ['arm64'], running: false, lastRunAt: null, lastCommit: null, lastResult: null }
+/** The server's paged shape: pageSize defaults to 50, clamped to 1..200; page below 1 is 1. */
+const paged = (url, all) => {
+  const page = Math.max(parseInt(url.searchParams.get('page'), 10) || 1, 1)
+  const pageSize = Math.min(Math.max(parseInt(url.searchParams.get('pageSize'), 10) || 50, 1), 200)
+  return { items: all.slice((page - 1) * pageSize, page * pageSize), total: all.length, page, pageSize }
 }
 const problem = (res, status, title) => send(res, status, { status, title }, 'application/problem+json')
 const readJson = (req) => new Promise((ok) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { try { ok(JSON.parse(b || '{}')) } catch { ok({}) } }) })
@@ -52,7 +61,14 @@ http.createServer(async (req, res) => {
   }))
   if ((r = m(/^\/api\/repo\/([^/]+)\/packages$/))) {
     const s = (url.searchParams.get('search') || '').toLowerCase()
-    return send(res, 200, packages.filter((x) => x.platform === r[1] && x.fileName.toLowerCase().includes(s)).map(({ platform, ...x }) => x))
+    return send(res, 200, paged(url, packages.filter((x) => x.platform === r[1] && x.fileName.toLowerCase().includes(s)).map(({ platform, ...x }) => x)))
+  }
+  if ((r = m(/^\/api\/repo\/([^/]+)\/packages\/(.+)$/)) && req.method === 'DELETE') {
+    if (!admin) return problem(res, user ? 403 : 401, user ? 'Forbidden' : 'Unauthorized')
+    const i = packages.findIndex((x) => x.platform === r[1] && x.fileName === decodeURIComponent(r[2]))
+    if (i < 0) return problem(res, 404, 'Not Found')
+    packages.splice(i, 1)
+    return send(res, 204)
   }
   if ((r = m(/^\/repo\/([^/]+)\/packages\/(.+)$/))) {
     return packages.some((x) => x.platform === r[1] && x.fileName === decodeURIComponent(r[2])) ? send(res, 200, 'mock hpkg', 'application/octet-stream') : send(res, 404)
@@ -97,13 +113,26 @@ http.createServer(async (req, res) => {
     clients,
   })
   if (p === '/api/recipes/sync') return send(res, 200, { added: 0, updated: 2, total: recipes.length })
+  if (p === '/api/settings/auto-update' && req.method === 'GET') return send(res, 200, autoUpdate)
+  if (p === '/api/settings/auto-update' && req.method === 'PUT') {
+    const { enabled, intervalHours, platforms } = await readJson(req)
+    if (!(intervalHours >= 1)) return problem(res, 400, 'One or more validation errors occurred.')
+    Object.assign(autoUpdate, { enabled: !!enabled, intervalHours, platforms: PLATFORMS.filter((x) => platforms?.includes(x)) })
+    return send(res, 200, autoUpdate)
+  }
+  if (p === '/api/settings/auto-update/run' && req.method === 'POST') {
+    Object.assign(autoUpdate, { lastRunAt: new Date().toISOString(), lastCommit: '3f2a9c1d0b7e5a4c3f2a9c1d0b7e5a4c3f2a9c1d', lastResult: {
+      changedPorts: ['curl', 'vim'], queued: 1, note: null, error: null,
+      skipped: [{ port: 'vim', platform: 'arm64', reason: 'vim-9.1.0-1 already published; bump REVISION to rebuild' }] } })
+    return send(res, 200, autoUpdate)
+  }
   if (p === '/api/recipes') {
     const s = (url.searchParams.get('search') || '').toLowerCase()
-    return send(res, 200, recipes.filter((x) => x.portName.includes(s)))
+    return send(res, 200, paged(url, recipes.filter((x) => x.portName.includes(s))))
   }
   if (p === '/api/jobs' && req.method === 'GET') {
     const st = url.searchParams.get('status'), pl = url.searchParams.get('platform')
-    return send(res, 200, jobs.filter((j) => (!st || j.status === st) && (!pl || j.platform === pl)).sort((a, b) => b.id - a.id))
+    return send(res, 200, paged(url, jobs.filter((j) => (!st || j.status === st) && (!pl || j.platform === pl)).sort((a, b) => b.id - a.id)))
   }
   if (p === '/api/jobs' && req.method === 'POST') {
     const { portName, version, platforms } = await readJson(req)
@@ -120,4 +149,4 @@ http.createServer(async (req, res) => {
     return send(res, 200, j)
   }
   problem(res, 404, 'Not found')
-}).listen(8080, () => console.log('mock backend on http://localhost:8080'))
+}).listen(process.env.PORT || 8080, () => console.log(`mock backend on http://localhost:${process.env.PORT || 8080}`))

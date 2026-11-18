@@ -46,7 +46,8 @@ public class Job
     public string Platform { get; set; } = "";
     public JobStatus Status { get; set; }
     public DateTime QueuedAt { get; set; }
-    public string QueuedByUserId { get; set; } = "";
+    /// <summary>The admin who queued it; null for jobs queued by <see cref="Services.AutoUpdater"/> (shown as "auto-update").</summary>
+    public string? QueuedByUserId { get; set; }
     public AppUser? QueuedBy { get; set; }
     public Guid? ClaimedByClientId { get; set; }
     public BuildClient? ClaimedBy { get; set; }
@@ -122,4 +123,25 @@ public class SkippedPackage
 {
     public string FileName { get; set; } = "";
     public string Reason { get; set; } = "";
+}
+
+/// <summary>
+/// The single settings row (<see cref="SingletonId"/>) of <see cref="Services.AutoUpdater"/>: queue builds of the ports whose
+/// recipes changed in the ports tree, every <see cref="IntervalHours"/>, for <see cref="Platforms"/>.
+/// </summary>
+public class AutoUpdateSettings
+{
+    public const int SingletonId = 1;
+    public int Id { get; set; }
+    public bool Enabled { get; set; }
+    public int IntervalHours { get; set; } = 6;
+    /// <summary>Comma-separated platform names.</summary>
+    public string Platforms { get; set; } = "";
+    /// <summary>Set by the instance running an update (one atomic UPDATE); null when none runs. A stale value is taken over.</summary>
+    public DateTime? RunningSince { get; set; }
+    public DateTime? LastRunAt { get; set; }
+    /// <summary>The ports tree commit the last successful run processed; the next run diffs from it.</summary>
+    public string? LastCommit { get; set; }
+    /// <summary>JSON of <see cref="Services.AutoUpdateResult"/>.</summary>
+    public string? LastResultJson { get; set; }
 }

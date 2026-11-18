@@ -10,6 +10,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Job> Jobs => Set<Job>();
     public DbSet<Package> Packages => Set<Package>();
     public DbSet<Import> Imports => Set<Import>();
+    public DbSet<AutoUpdateSettings> AutoUpdateSettings => Set<AutoUpdateSettings>();
 
     /// <summary>All times are UTC; SQL Server drops the Kind, so mark values read back as UTC (JSON then ends in "Z").</summary>
     protected override void ConfigureConventions(ModelConfigurationBuilder c)
@@ -67,6 +68,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             e.HasOne(x => x.BuiltBy).WithMany().HasForeignKey(x => x.BuiltByUserId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<BuildClient>().WithMany().HasForeignKey(x => x.ClientId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne(x => x.Import).WithMany().HasForeignKey(x => x.ImportId).OnDelete(DeleteBehavior.NoAction);
+        });
+
+        b.Entity<AutoUpdateSettings>(e =>
+        {
+            e.Property(x => x.Id).ValueGeneratedNever();
+            e.Property(x => x.Platforms).HasMaxLength(100);
+            e.Property(x => x.LastCommit).HasMaxLength(64);
+            e.HasData(new AutoUpdateSettings { Id = Data.AutoUpdateSettings.SingletonId, Enabled = false, IntervalHours = 6, Platforms = "arm64" });
         });
 
         b.Entity<Import>(e =>

@@ -21,6 +21,7 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
     private record JobView(long Id, string PortName, string Version, string Platform, string Status, string? ClaimedBy, DateTime? LeaseExpiresAt,
         int Attempts, string? FailureSummary, bool HasLog, List<string> Packages);
     private record PackageView(string FileName, long Size, string Sha256, string PortName, string BuiltBy);
+    private record PageView<T>(List<T> Items, int Total, int Page, int PageSize);
 
     private async Task<JobView> QueueAsync(HttpClient admin, string port, string platform = "arm64")
     {
@@ -116,7 +117,7 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         var first = await (await admin.PostAsync("/api/recipes/sync", null)).Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(1, first.GetProperty("total").GetInt32());
         Assert.True(File.Exists(Path.Combine(checkout, "app-misc", "gitport", "gitport-1.0.recipe")));
-        var recipe = Assert.Single((await admin.GetFromJsonAsync<List<JsonElement>>("/api/recipes?search=gitport"))!);
+        var recipe = Assert.Single((await admin.GetFromJsonAsync<PageView<JsonElement>>("/api/recipes?search=gitport"))!.Items);
         Assert.Equal(DateTime.Parse("2020-01-02T03:04:05Z").ToUniversalTime(), recipe.GetProperty("recipeUpdatedAt").GetDateTime().ToUniversalTime());
 
         File.WriteAllText(Path.Combine(src, "app-misc", "gitport", "gitport-1.1.recipe"), "y\n");
@@ -203,7 +204,7 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         Assert.Equal([name], done.Packages);
 
         var anon = app.CreateClient();
-        var list = (await anon.GetFromJsonAsync<List<PackageView>>("/api/repo/arm64/packages?search=zlib"))!;
+        var list = (await anon.GetFromJsonAsync<PageView<PackageView>>("/api/repo/arm64/packages?search=zlib"))!.Items;
         var pkg = Assert.Single(list, p => p.FileName == name);
         Assert.Equal(bytes.Length, pkg.Size);
         Assert.Equal(Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)), pkg.Sha256);
@@ -274,7 +275,7 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         await app.WithDbAsync(async db => Assert.False(await db.Packages.AnyAsync(p => p.JobId == job.JobId)));
         Assert.Equal(job.JobId, again.JobId);
         Assert.Contains("lease", app.Mail.Sent.Skip(before).Single().Subject);
-        var view = Assert.Single((await admin.GetFromJsonAsync<List<JobView>>("/api/jobs"))!);
+        var view = Assert.Single((await admin.GetFromJsonAsync<PageView<JobView>>("/api/jobs"))!.Items);
         Assert.Equal(2, view.Attempts);
         // The first client lost the job.
         Assert.Equal(HttpStatusCode.Forbidden, (await UploadAsync(first, job.JobId, Hpkg("zlib"), [1])).StatusCode);
@@ -314,7 +315,7 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         var anon = app.CreateClient();
 
         Assert.Equal(HttpStatusCode.OK, (await UploadAsync(client, job.JobId, name, [1, 1])).StatusCode);
-        Assert.DoesNotContain((await anon.GetFromJsonAsync<List<PackageView>>("/api/repo/arm64/packages"))!, p => p.FileName == name);
+        Assert.DoesNotContain((await anon.GetFromJsonAsync<PageView<PackageView>>("/api/repo/arm64/packages"))!.Items, p => p.FileName == name);
         Assert.Equal(0, (await anon.GetFromJsonAsync<JsonElement>("/api/platforms")).EnumerateArray()
             .Single(p => p.GetProperty("platform").GetString() == "arm64").GetProperty("packageCount").GetInt32());
         Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync($"/repo/arm64/packages/{name}")).StatusCode);

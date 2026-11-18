@@ -66,6 +66,8 @@ for state in ('complete', 'failed', 'lost', 'skipped', 'blocked', 'active', 'sch
 print(f"missing|||not in buildrun (run state: {status['buildStatus']})")
 EOF
 )
+# Dependencies the master built first in this run are uploaded with the port, so they reach the portal too.
+deps=$($dc python3 -c "import json, sys; print(' '.join(p for b in json.load(open(sys.argv[1]))['builds'].get('complete', []) if b['port']['name'] != sys.argv[2] for p in b.get('resultingPackages', [])))" "$runs/$run/status.json" "$port")
 IFS='|' read -r state builds hpkgs reason <<< "$result"
 
 for n in $builds; do
@@ -91,6 +93,7 @@ if [ -z "$hpkgs" ]; then
 	hpkgs=$($dc sh -c 'cd /var/buildmaster/haikuports/packages && ls -- "$1-$2"-*.hpkg "$1"_*-"$2"-*.hpkg 2> /dev/null | grep -v -- "-source\.hpkg$"' sh "$port" "$version" | tr '\n' ' ') || true
 	[ -n "$hpkgs" ] || { echo "$port-$version: $state, but no $port-$version hpkgs in the master's packages/ (buildrun $run)" >&2; exit 1; }
 fi
+[ -z "$deps" ] || { echo "dependencies built in buildrun $run: $deps"; hpkgs="$hpkgs $deps"; }
 # shellcheck disable=SC2086 # hpkgs is a space-separated list of file names
 $dc tar -C /var/buildmaster/haikuports/packages -cf - $hpkgs | tar -C "$out" -xf -
 for h in $hpkgs; do [ -s "$out/$h" ] || { echo "missing $h after copy" >&2; exit 1; }; done

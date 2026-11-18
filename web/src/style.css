@@ -203,3 +203,22 @@ tbody.pkg tr:hover { background: none; }
 .secret { margin-top: 1rem; padding: 1rem; border: 1px solid hsl(var(--primary)); border-radius: var(--radius); background: hsl(var(--muted)); }
 .secret-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 .secret-row > span { min-width: 5rem; color: hsl(var(--muted-foreground)); }
+
+/* Paged lists: the old rows stay (dimmed) while the next page loads, so the table keeps its height. */
+table.loading tbody { opacity: .5; transition: opacity .15s; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .5rem 1rem; margin-top: 1rem; color: hsl(var(--muted-foreground)); font-size: .9rem; }
+
+/* Two-line list rows (Admin jobs): line 1 wraps instead of clipping; the actions sit right, or under the port when narrow. */
+.rows { list-style: none; margin: 0; padding: 0; }
+.rows > li { padding: .5rem .6rem; border-bottom: 1px solid hsl(var(--border)); min-width: 0; }
+.rows > li:hover { background: hsla(0, 0%, 100%, .03); }
+.rows.loading > li { opacity: .5; transition: opacity .15s; }
+.row-head { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .75rem; }
+.row-head strong { overflow-wrap: anywhere; }
+.row-actions { margin-left: auto; display: flex; gap: .5rem; }
+.row-details { padding-left: 1rem; margin-top: .15rem; overflow-wrap: anywhere; }
+.row-details .summary { margin: .25rem 0; }
+.pkg-names { margin: .25rem 0; padding-left: 1.25rem; }
+.pkg-names-inline code { margin-right: .5rem; }
+.row-file { overflow-wrap: anywhere; min-width: 0; }
+.input-narrow { width: 8rem; }

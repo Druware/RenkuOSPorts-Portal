@@ -78,7 +78,7 @@ public partial class ApiTests
         Assert.Equal((1, 0), (again.Missing, again.Imported)); // only the corrupt one is still missing
 
         var anon = app.CreateClient();
-        var listed = (await anon.GetFromJsonAsync<List<PackageView>>("/api/repo/arm64/packages"))!;
+        var listed = (await anon.GetFromJsonAsync<PageView<PackageView>>("/api/repo/arm64/packages"))!.Items;
         Assert.Equal(real[..2].Order(), listed.Select(p => p.FileName).Order());
         Assert.All(listed, p => Assert.Equal($"import: {new Uri(server.Url).Authority}", p.BuiltBy));
         Assert.Equal("markupsafe", listed.Single(p => p.FileName == real[1]).PortName);

@@ -22,12 +22,13 @@ public static class PublicEndpoints
                 ? s : new { Platform = p, PackageCount = 0, TotalBytes = 0L, LastUploadAt = (DateTime?)null });
         });
 
-        app.MapGet("/api/repo/{platform}/packages", async (string platform, string? search, AppDbContext db) =>
+        // Newest first, Id as tiebreak so pages never overlap or skip. Page past the end: no items, the real total.
+        app.MapGet("/api/repo/{platform}/packages", async (string platform, string? search, int? page, int? pageSize, AppDbContext db) =>
         {
             if (!Validate.IsPlatform(platform)) return Results.NotFound();
             var q = Published(db).Where(p => p.Platform == platform);
             if (!string.IsNullOrWhiteSpace(search)) q = q.Where(p => p.FileName.Contains(search));
-            return Results.Ok(await q.OrderByDescending(p => p.UploadedAt).ThenByDescending(p => p.Id).Select(Project.Package).ToListAsync());
+            return Results.Ok(await Paged<PackageDto>.FromAsync(q, o => o.OrderByDescending(p => p.UploadedAt).ThenByDescending(p => p.Id), Project.Package, page, pageSize));
         });
 
         // pkgman's repository index, built by RepoIndexer; 404 until the platform's first build.
