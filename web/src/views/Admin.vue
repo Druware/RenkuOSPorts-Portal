@@ -265,6 +265,39 @@ async function deletePackage(p) {
   }
 }
 
+// ---- Maintenance: delete old build logs and unneeded package files (always a preview first, then a confirmed run) ----
+const logForm = reactive({ olderThanDays: 90 })
+const fileForm = reactive({ orphans: true, superseded: false, keep: 2, staged: true })
+const logPreview = ref(null) // { key, result }: the dry run and the inputs it was made with
+const filePreview = ref(null)
+const cleanBusy = ref(false)
+const logBody = () => ({ olderThanDays: logForm.olderThanDays })
+const fileBody = () => ({ orphans: fileForm.orphans, superseded: fileForm.superseded ? { keep: fileForm.keep } : null, staged: fileForm.staged })
+const tallyText = (t) => `${t.count} (${formatBytes(t.bytes)})`
+/** Delete is enabled only while the inputs are those of the last preview. */
+const previewed = (pv, body) => pv?.key === JSON.stringify(body)
+async function cleanup(kind, dryRun) {
+  const logs = kind === 'logs'
+  const body = logs ? logBody() : fileBody()
+  const pv = logs ? logPreview : filePreview
+  if (!dryRun) {
+    const r = pv.value.result
+    const what = logs
+      ? `the build logs of ${tallyText(r)} finished jobs completed more than ${body.olderThanDays} days ago`
+      : [r.superseded && `${tallyText(r.superseded)} published packages of all but the newest ${body.superseded.keep} version(s) of each port`,
+         r.staged && `the files of ${tallyText(r.staged)} staged uploads of discarded builds and finished jobs (failed jobs can then no longer be approved)`,
+         r.orphans && `${tallyText(r.orphans)} unreferenced files`].filter(Boolean).join(';\n')
+    if (!confirm(`Delete ${what}?\n\nThis cannot be undone.`)) return
+  }
+  cleanBusy.value = true
+  try {
+    const result = await api(`/admin/cleanup/${kind}`, { method: 'POST', body: { ...body, dryRun } })
+    pv.value = dryRun ? { key: JSON.stringify(body), result } : null
+    if (dryRun) ok('Preview ready: nothing was deleted.')
+    else ok(logs ? `Deleted ${tallyText(result)} build logs.` : `Deleted: ${['superseded', 'staged', 'orphans'].filter((k) => result[k]).map((k) => `${k} ${tallyText(result[k])}`).join(', ')}; ${formatBytes(result.total.bytes)} freed.`)
+  } catch (e) { fail(e) } finally { cleanBusy.value = false }
+}
+
 watch(tab, (t) => {
   notice.value = ''
   if (t === 'dashboard') loadDashboard()
@@ -278,7 +311,7 @@ watch(tab, (t) => {
 <template>
   <h1 class="page-title">Ports dashboard</h1>
   <div class="tabs" role="group" aria-label="Admin sections">
-    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes'], ['packages', 'Packages'], ['import', 'Import']]" :key="k" type="button"
+    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes'], ['packages', 'Packages'], ['import', 'Import'], ['maintenance', 'Maintenance']]" :key="k" type="button"
       class="tab" :aria-pressed="tab === k" @click="tab = k">{{ label }}</button>
   </div>
 
@@ -459,6 +492,43 @@ watch(tab, (t) => {
       <li v-if="!pkgLoading && !pkgs.items.length && !pkgError" class="muted">{{ pkgs.total ? 'No packages on this page.' : `No packages${pkg.search ? ' match your search' : ''}.` }}</li>
     </ul>
     <Pager v-if="pkgs.total" :page="pkgs.page" :page-size="pkgs.pageSize" :total="pkgs.total" @update:page="goToPackagePage" />
+  </HaikuWindow>
+
+  <HaikuWindow v-else-if="tab === 'maintenance'" title="Maintenance">
+    <form class="form" @submit.prevent="cleanup('logs', true)">
+      <h3>Build logs</h3>
+      <p class="muted small">Deletes the logs of succeeded, failed and cancelled jobs. Jobs still queued, building, verifying or awaiting an override keep theirs.</p>
+      <label for="mt-days">Completed more than (days ago)</label>
+      <input id="mt-days" v-model.number="logForm.olderThanDays" type="number" min="1" max="36500" required class="input-narrow" />
+      <div class="toolbar">
+        <button type="submit" class="btn" :disabled="cleanBusy">Preview</button>
+        <button type="button" class="btn btn-danger" :disabled="cleanBusy || !previewed(logPreview, logBody())" @click="cleanup('logs', false)">Delete</button>
+      </div>
+      <p v-if="previewed(logPreview, logBody())" class="small" aria-live="polite">Would delete {{ logPreview.result.count }} log(s), {{ formatBytes(logPreview.result.bytes) }}.</p>
+    </form>
+    <form class="form" @submit.prevent="cleanup('files', true)">
+      <h3>Package files</h3>
+      <fieldset>
+        <legend>Delete</legend>
+        <label class="check"><input v-model="fileForm.orphans" type="checkbox" /> Unreferenced files (no package or upload names them; older than 24 hours)</label>
+        <label class="check"><input v-model="fileForm.superseded" type="checkbox" /> Superseded versions: published packages of older versions of each port</label>
+        <label class="check"><input v-model="fileForm.staged" type="checkbox" /> Stale staged uploads (discarded, expired or failed builds; finished jobs)</label>
+      </fieldset>
+      <template v-if="fileForm.superseded">
+        <label for="mt-keep">Keep the newest N versions of each port</label>
+        <input id="mt-keep" v-model.number="fileForm.keep" type="number" min="1" max="1000" required class="input-narrow" />
+      </template>
+      <div class="toolbar">
+        <button type="submit" class="btn" :disabled="cleanBusy || !(fileForm.orphans || fileForm.superseded || fileForm.staged)">Preview</button>
+        <button type="button" class="btn btn-danger" :disabled="cleanBusy || !previewed(filePreview, fileBody())" @click="cleanup('files', false)">Delete</button>
+      </div>
+      <ul v-if="previewed(filePreview, fileBody())" class="small" aria-live="polite">
+        <li v-if="filePreview.result.superseded">Superseded: {{ filePreview.result.superseded.count }} package(s), {{ formatBytes(filePreview.result.superseded.bytes) }}</li>
+        <li v-if="filePreview.result.staged">Staged uploads: {{ filePreview.result.staged.count }} upload(s), {{ formatBytes(filePreview.result.staged.bytes) }}</li>
+        <li v-if="filePreview.result.orphans">Unreferenced: {{ filePreview.result.orphans.count }} file(s), {{ formatBytes(filePreview.result.orphans.bytes) }}</li>
+        <li><strong>Total freed: {{ formatBytes(filePreview.result.total.bytes) }}</strong></li>
+      </ul>
+    </form>
   </HaikuWindow>
 
   <template v-else-if="tab === 'import'">

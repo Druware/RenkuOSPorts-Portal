@@ -154,5 +154,17 @@ http.createServer(async (req, res) => {
     j.status = r[2] === 'requeue' ? 'Queued' : 'Cancelled'
     return send(res, 200, j)
   }
+  if (p === '/api/admin/cleanup/logs' && req.method === 'POST') {
+    const { olderThanDays } = await readJson(req)
+    if (!(olderThanDays >= 1)) return problem(res, 400, 'One or more validation errors occurred.')
+    return send(res, 200, { count: 3, bytes: 3 * 48213 })
+  }
+  if (p === '/api/admin/cleanup/files' && req.method === 'POST') {
+    const { orphans, superseded, staged } = await readJson(req)
+    const t = (on, count, bytes) => (on ? { count, bytes } : null)
+    const r = { orphans: t(orphans, 4, 9.5e6), superseded: t(superseded, 6, 4.2e7), staged: t(staged, 12, 1.1e8) }
+    const all = Object.values(r).filter(Boolean)
+    return send(res, 200, { ...r, total: { count: all.reduce((a, x) => a + x.count, 0), bytes: all.reduce((a, x) => a + x.bytes, 0) } })
+  }
   problem(res, 404, 'Not found')
 }).listen(process.env.PORT || 8080, () => console.log(`mock backend on http://localhost:${process.env.PORT || 8080}`))

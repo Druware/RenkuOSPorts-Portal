@@ -14,6 +14,10 @@ public static class AdminEndpoints
     public record QueueTopRequest(int? Count);
     public record ApproveRequest(long BuildId, string? Reason, bool EmbedsDates);
     public record AutoUpdateRequest(bool Enabled, int IntervalHours, string[]? Platforms);
+    public record LogCleanupRequest(int? OlderThanDays, bool? DryRun);
+    public record KeepVersions(int Keep);
+    public record FileCleanupRequest(bool Orphans, KeepVersions? Superseded, bool Staged, bool? DryRun);
+    public record FileCleanupResult(Tally? Orphans, Tally? Superseded, Tally? Staged, Tally Total);
     public record AutoUpdateDto(bool Enabled, int IntervalHours, string[] Platforms, bool Running, DateTime? LastRunAt, string? LastCommit, AutoUpdateResult? LastResult);
 
     private static async Task<AutoUpdateDto> AutoUpdateAsync(AppDbContext db)
@@ -227,17 +231,64 @@ public static class AdminEndpoints
             var log = logs.CreateLogger("AdminEndpoints");
             log.LogInformation("{User} deleted package {Platform}/{FileName} (sha256 {Sha256}, job {JobId}, import {ImportId})",
                 user.Identity?.Name, platform, fileName, pkg.Sha256, pkg.JobId, pkg.ImportId);
-            // shortcut: an upload that reuses this blob between this check and the delete would lose its bytes; uploads of an existing name are rare, add a blob lease if it matters.
-            if (!await db.Packages.AnyAsync(p => p.BlobName == pkg.BlobName))
+            try { await Cleanup.DeleteIfUnreferencedAsync(db, blobs, pkg.BlobName); }
+            catch (Azure.RequestFailedException e)
             {
-                try { await blobs.GetBlobClient(pkg.BlobName).DeleteIfExistsAsync(); }
-                catch (Azure.RequestFailedException e)
-                {
-                    // The package is gone (row deleted); only its bytes are left behind.
-                    log.LogError(e, "Deleting blob {Blob} of deleted package {Platform}/{FileName} failed; the blob is orphaned", pkg.BlobName, platform, fileName);
-                }
+                // The package is gone (row deleted); only its bytes are left behind.
+                log.LogError(e, "Deleting blob {Blob} of deleted package {Platform}/{FileName} failed; the blob is orphaned", pkg.BlobName, platform, fileName);
             }
             return Results.NoContent();
+        });
+
+        // Maintenance (Services/Cleanup.cs). dryRun defaults to true, so a request that omits it deletes nothing.
+        g.MapPost("/admin/cleanup/logs", async (LogCleanupRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs, TimeProvider time, ILoggerFactory logs) =>
+        {
+            if (req.OlderThanDays is not (>= 1 and <= 36500))
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["olderThanDays"] = ["From 1 to 36500 days."] });
+            var dryRun = req.DryRun ?? true;
+            if (!Cleanup.Lock.Wait(0)) return Results.Problem(statusCode: 409, title: "A cleanup is already running");
+            try
+            {
+                var tally = await Cleanup.LogsAsync(db, blobs, time.GetUtcNow().UtcDateTime.AddDays(-req.OlderThanDays.Value), dryRun);
+                if (!dryRun) logs.CreateLogger("AdminEndpoints").LogInformation("{User} deleted {Count} build logs ({Bytes} bytes) older than {Days} days",
+                    user.Identity?.Name, tally.Count, tally.Bytes, req.OlderThanDays);
+                return Results.Ok(tally);
+            }
+            finally { Cleanup.Lock.Release(); }
+        });
+
+        g.MapPost("/admin/cleanup/files", async (FileCleanupRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs, TimeProvider time,
+            RepoIndexer indexer, PriorityComputer priorities, ILoggerFactory logs) =>
+        {
+            if (req.Superseded is { Keep: < 1 or > 1000 })
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["superseded.keep"] = ["From 1 to 1000 versions."] });
+            if (!req.Orphans && req.Superseded is null && !req.Staged)
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["categories"] = ["Choose orphans, superseded or staged."] });
+            var dryRun = req.DryRun ?? true;
+            if (!Cleanup.Lock.Wait(0)) return Results.Problem(statusCode: 409, title: "A cleanup is already running");
+            try
+            {
+                var log = logs.CreateLogger("AdminEndpoints");
+                // Superseded and staged first: the blobs they free are then gone (or still referenced, in a dry run), never counted again as orphans.
+                Tally? superseded = null, staged = null, orphans = null;
+                if (req.Superseded is { } s)
+                {
+                    (superseded, var platforms) = await Cleanup.SupersededAsync(db, blobs, s.Keep, dryRun, log, user.Identity?.Name);
+                    if (!dryRun && platforms.Count > 0)
+                    {
+                        foreach (var p in platforms) indexer.MarkDirty(p);
+                        priorities.MarkDirty();
+                    }
+                }
+                if (req.Staged) staged = await Cleanup.StagedAsync(db, blobs, dryRun);
+                if (req.Orphans) orphans = await Cleanup.OrphansAsync(db, blobs, time.GetUtcNow() - Cleanup.OrphanMinAge, dryRun);
+                Tally[] all = [.. new[] { superseded, staged, orphans }.OfType<Tally>()];
+                var total = new Tally { Count = all.Sum(t => t.Count), Bytes = all.Sum(t => t.Bytes) };
+                if (!dryRun) log.LogInformation("{User} purged files: superseded {Superseded}, staged {Staged}, orphans {Orphans}; {Bytes} bytes freed",
+                    user.Identity?.Name, superseded?.Count, staged?.Count, orphans?.Count, total.Bytes);
+                return Results.Ok(new FileCleanupResult(orphans, superseded, staged, total));
+            }
+            finally { Cleanup.Lock.Release(); }
         });
 
         g.MapGet("/settings/auto-update", (AppDbContext db) => AutoUpdateAsync(db));
