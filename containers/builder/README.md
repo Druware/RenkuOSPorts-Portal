@@ -4,7 +4,7 @@ Builds one port for a RenkuOS platform by booting a RenkuOS builder guest under 
 
 ## Status
 
-- Guest builder images are not published yet. `images.json` has placeholder entries, so `build` and `fetch-images` exit 5 ("no builder image published for <arch>") until real URLs and SHA-256 values are filled in. The arm64 and x86_64 images are built by `../builder-images/<arch>` and have been booted with this container through a `file://` manifest; x86 has no image yet.
+- `images.json` points at the arm64 and x86_64 guest images in the GitHub release `builder-images-hrev60072-1053`, built by `../builder-images/<arch>` from RenkuOS hrev60072+1053. x86 has no image yet: its entry is a placeholder, so `build` and `fetch-images` exit 5 ("no builder image published for x86").
 - riscv64 is unsupported: `build riscv64 ...` exits 3 and `info --json` lists it under `unsupported`. Its QEMU arguments are kept as a comment in `qemu_argv` in `entrypoint/renkuports-build`; enabling it also needs `qemu-system-misc` and `u-boot-qemu` in the Dockerfile.
 
 ## Build

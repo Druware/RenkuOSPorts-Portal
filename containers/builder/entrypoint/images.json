@@ -1,8 +1,8 @@
 {
   "version": 1,
   "images": {
-    "arm64": { "url": "", "sha256": "", "diskSha256": "", "bytes": 0, "haikuRev": "" },
-    "x86_64": { "url": "", "sha256": "", "diskSha256": "", "bytes": 0, "haikuRev": "" },
+    "arm64": { "url": "https://github.com/Druware/RenkuOSPorts-Portal/releases/download/builder-images-hrev60072-1053/renkuports-guest-arm64-hrev60072-1053-ga35b4b4158.qcow2.xz", "sha256": "d9c6959a9765a5144e1e17893d464ede67fb1270f360f3d89f53a8e5316d4027", "diskSha256": "e54c6c049dcbcb2173be9b7f6038d1ebd87ab782dccf391c72fd47cd289e0de1", "bytes": 437735404, "haikuRev": "hrev60072+1053" },
+    "x86_64": { "url": "https://github.com/Druware/RenkuOSPorts-Portal/releases/download/builder-images-hrev60072-1053/renkuports-guest-x86_64-hrev60072_1053-a35b4b415889.qcow2.xz", "sha256": "8f1c490bd88032dae590f2e8f7e73977d8269a15a1b8f2768f30facc56bf8820", "diskSha256": "aa0dc9bb6ce7f0de9393dff1a9a9beb303fd344e50b63840b870bb10c83f3466", "bytes": 515368828, "haikuRev": "hrev60072+1053" },
     "x86": { "url": "", "sha256": "", "diskSha256": "", "bytes": 0, "haikuRev": "" }
   }
 }

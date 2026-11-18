@@ -67,9 +67,9 @@ expect 3 "mock infra port" "$IMG" mock x86 infrabroken 1.0
 expect 5 "mock badimage port" "$IMG" mock x86 badimagefoo 1.0
 
 echo "# guest images"
-expect 5 "placeholder manifest: build" "$IMG" build arm64 libfoo 1.0
-grep -q "no builder image published for arm64" "$tmp/log" && pass "placeholder message" || fail "placeholder message"
-expect 5 "placeholder manifest: fetch-images" "$IMG" fetch-images x86_64
+expect 5 "placeholder manifest: build" "$IMG" build x86 libfoo 1.0
+grep -q "no builder image published for x86" "$tmp/log" && pass "placeholder message" || fail "placeholder message"
+expect 5 "placeholder manifest: fetch-images" "$IMG" fetch-images x86
 
 echo "# guest ssh key"
 pubkey() { docker run --rm -v "$1:/cache" --entrypoint sh "$IMG" -c 'stat -c %a /cache/ssh/id_ed25519 && cat /cache/ssh/id_ed25519.pub'; }
