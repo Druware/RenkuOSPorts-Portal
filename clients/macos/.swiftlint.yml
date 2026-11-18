@@ -1,0 +1,27 @@
+# Style for clients/macos (StyleGuide-Swift section 2.3). Run from here: swiftformat . && swiftlint --strict
+excluded:
+  - .build
+disabled_rules:
+  # SwiftFormat owns these (it adds trailing commas and puts a brace after a multi-line condition on its own line).
+  - trailing_comma
+  - opening_brace
+  # Logs and server replies are decoded lossily on purpose: a log tail can start inside a UTF-8 sequence.
+  - optional_data_string_conversion
+line_length:
+  warning: 120
+  error: 160
+identifier_name:
+  min_length: 2
+  excluded: [i, n, c, s]
+# The worker's job flow and the pre-flight checklist read top to bottom as in the spec and the Haiku client's
+# Worker.cpp; splitting them would scatter one sequence over several functions.
+function_body_length:
+  warning: 100
+cyclomatic_complexity:
+  warning: 20
+type_body_length:
+  warning: 400
+file_length:
+  warning: 500
+opt_in_rules:
+  - force_unwrapping

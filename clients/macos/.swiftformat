@@ -1,0 +1,8 @@
+# Style for clients/macos (StyleGuide-Swift section 2.3). Run: swiftformat . && swiftlint
+--swiftversion 6.0
+--indent 4
+--maxwidth 120
+--wraparguments before-first
+--wrapcollections before-first
+--exclude .build
+--disable wrapIfStatementBodies,wrapFunctionBodies,wrapPropertyBodies,wrapLoopBodies
