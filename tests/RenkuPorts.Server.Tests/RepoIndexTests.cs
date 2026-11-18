@@ -56,6 +56,41 @@ public class RepoIndexTests
         Assert.Equal("plain [1m text", BuildClientApi.StripAnsi("plain [1m text"));
     }
 
+    [Fact]
+    public void Repo_listing_gives_architecture_vendor_and_each_file_with_its_checksum()
+    {
+        // Shape of `package_repo list -f -v` (command_list.cpp): attributes per package, then "filename:" at column 0.
+        var listing = RepoListing.Parse("""
+            repository-info:
+            	name: RenkuOSPorts
+            	vendor: Haiku Project
+            	architecture: arm64
+            packages:
+            package-attributes:
+            	name: packaging
+            	architecture: any
+            	checksum: F2E90FE7A9D832551F0E3619F6275D24177323909309466106635673F08BF0F1
+            filename: packaging-26.2-1-any.hpkg
+            package-attributes:
+            	name: old
+            filename: old-1-1-arm64.hpkg
+            """);
+        Assert.Equal(("arm64", "Haiku Project"), (listing.Architecture, listing.Vendor));
+        Assert.Equal([new SourcePackage("packaging-26.2-1-any.hpkg", "f2e90fe7a9d832551f0e3619f6275d24177323909309466106635673f08bf0f1"),
+            new SourcePackage("old-1-1-arm64.hpkg", null)], listing.Packages);
+    }
+
+    [Theory]
+    [InlineData("inih_devel-r56-1-arm64.hpkg", "inih")]
+    [InlineData("xz_utils_devel-5.8-1-arm64.hpkg", "xz_utils")]
+    [InlineData("xz_utils-5.8-1-arm64.hpkg", "xz_utils")]
+    [InlineData("unknown_devel-1-1-arm64.hpkg", "unknown_devel")]
+    public void Imported_package_port_is_the_longest_known_recipe_prefix(string fileName, string port)
+    {
+        var recipes = new Dictionary<string, DateTime> { ["inih"] = default, ["xz_utils"] = default, ["xz"] = default };
+        Assert.Equal(port, RepoImporter.PortName(fileName, recipes));
+    }
+
     [HaikuToolsFact]
     public async Task Package_repo_creates_and_incrementally_updates_an_index_of_real_packages()
     {

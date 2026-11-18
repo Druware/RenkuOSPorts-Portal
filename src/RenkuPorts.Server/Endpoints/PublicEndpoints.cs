@@ -8,8 +8,8 @@ namespace RenkuPorts.Server.Endpoints;
 /// <summary>Anonymous repository browsing and package download.</summary>
 public static class PublicEndpoints
 {
-    /// <summary>Packages of succeeded jobs; uploads of a job still building (or that failed) are not public.</summary>
-    internal static IQueryable<Package> Published(AppDbContext db) => db.Packages.Where(p => p.Job!.Status == JobStatus.Succeeded);
+    /// <summary>Packages of succeeded jobs, and imported ones; uploads of a job still building (or that failed) are not public.</summary>
+    internal static IQueryable<Package> Published(AppDbContext db) => db.Packages.Where(p => p.Job!.Status == JobStatus.Succeeded || p.ImportId != null);
 
     public static void Map(WebApplication app)
     {

@@ -12,7 +12,7 @@ using RenkuPorts.Server.Services;
 namespace RenkuPorts.Server.Tests;
 
 /// <summary>Integration tests over HTTP. They share one database, so each starts from an empty job queue.</summary>
-public class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyncLifetime
+public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyncLifetime
 {
     public Task InitializeAsync() => app.ResetQueueAsync();
     public Task DisposeAsync() => Task.CompletedTask;

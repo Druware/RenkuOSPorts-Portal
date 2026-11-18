@@ -265,6 +265,77 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.ToTable("BuildClients");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.Import", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<bool>("CancelRequested")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("DryRun")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("FinishedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Imported")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Missing")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Platform")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("SourceHost")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<string>("SourceUrl")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("StartedByUserId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<int>("Total")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Platform")
+                        .IsUnique()
+                        .HasFilter("[Status] = 'Running'");
+
+                    b.HasIndex("StartedByUserId");
+
+                    b.ToTable("Imports");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Job", b =>
                 {
                     b.Property<long>("Id")
@@ -362,6 +433,9 @@ namespace RenkuPorts.Server.Data.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("nvarchar(255)");
 
+                    b.Property<long?>("ImportId")
+                        .HasColumnType("bigint");
+
                     b.Property<long?>("JobId")
                         .HasColumnType("bigint");
 
@@ -394,6 +468,8 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.HasIndex("BuiltByUserId");
 
                     b.HasIndex("ClientId");
+
+                    b.HasIndex("ImportId");
 
                     b.HasIndex("JobId");
 
@@ -506,6 +582,44 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.Navigation("Owner");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.Import", b =>
+                {
+                    b.HasOne("RenkuPorts.Server.Data.AppUser", "StartedBy")
+                        .WithMany()
+                        .HasForeignKey("StartedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.OwnsMany("RenkuPorts.Server.Data.SkippedPackage", "Skipped", b1 =>
+                        {
+                            b1.Property<long>("ImportId");
+
+                            b1.Property<int>("__synthesizedOrdinal")
+                                .ValueGeneratedOnAddOrUpdate();
+
+                            b1.Property<string>("FileName")
+                                .IsRequired();
+
+                            b1.Property<string>("Reason")
+                                .IsRequired();
+
+                            b1.HasKey("ImportId", "__synthesizedOrdinal");
+
+                            b1.ToTable("Imports");
+
+                            b1
+                                .ToJson("Skipped")
+                                .HasColumnType("nvarchar(max)");
+
+                            b1.WithOwner()
+                                .HasForeignKey("ImportId");
+                        });
+
+                    b.Navigation("Skipped");
+
+                    b.Navigation("StartedBy");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Job", b =>
                 {
                     b.HasOne("RenkuPorts.Server.Data.BuildClient", "ClaimedBy")
@@ -545,12 +659,19 @@ namespace RenkuPorts.Server.Data.Migrations
                         .HasForeignKey("ClientId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("RenkuPorts.Server.Data.Import", "Import")
+                        .WithMany()
+                        .HasForeignKey("ImportId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
                     b.HasOne("RenkuPorts.Server.Data.Job", "Job")
                         .WithMany("Packages")
                         .HasForeignKey("JobId")
                         .OnDelete(DeleteBehavior.NoAction);
 
                     b.Navigation("BuiltBy");
+
+                    b.Navigation("Import");
 
                     b.Navigation("Job");
                 });

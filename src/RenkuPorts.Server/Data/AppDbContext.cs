@@ -9,6 +9,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Recipe> Recipes => Set<Recipe>();
     public DbSet<Job> Jobs => Set<Job>();
     public DbSet<Package> Packages => Set<Package>();
+    public DbSet<Import> Imports => Set<Import>();
 
     /// <summary>All times are UTC; SQL Server drops the Kind, so mark values read back as UTC (JSON then ends in "Z").</summary>
     protected override void ConfigureConventions(ModelConfigurationBuilder c)
@@ -65,6 +66,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             e.HasIndex(x => new { x.Platform, x.FileName }).IsUnique();
             e.HasOne(x => x.BuiltBy).WithMany().HasForeignKey(x => x.BuiltByUserId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne<BuildClient>().WithMany().HasForeignKey(x => x.ClientId).OnDelete(DeleteBehavior.SetNull);
+            e.HasOne(x => x.Import).WithMany().HasForeignKey(x => x.ImportId).OnDelete(DeleteBehavior.NoAction);
+        });
+
+        b.Entity<Import>(e =>
+        {
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.SourceUrl).HasMaxLength(2000);
+            e.Property(x => x.SourceHost).HasMaxLength(255);
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.Error).HasMaxLength(2000);
+            e.OwnsMany(x => x.Skipped, s => s.ToJson());
+            // At most one Running import per platform.
+            e.HasIndex(x => x.Platform).IsUnique().HasFilter("[Status] = 'Running'");
+            e.HasOne(x => x.StartedBy).WithMany().HasForeignKey(x => x.StartedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

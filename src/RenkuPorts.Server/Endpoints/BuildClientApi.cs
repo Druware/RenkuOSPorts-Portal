@@ -1,9 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Security.Claims;
-using Azure;
 using Azure.Storage.Blobs;
-using Azure.Storage.Blobs.Models;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Net.Http.Headers;
 using Microsoft.AspNetCore.Identity;
@@ -139,51 +137,18 @@ public static partial class BuildClientApi
                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out buildDate))
                 return BadRequest("buildDate must be an ISO-8601 date.");
 
-            var blobName = $"{job.Platform}/{sha}/{fileName}";
-            var blob = blobs.GetBlobClient(blobName);
-            await using var body = new HashingStream(section.Body);
-            bool wrote;
-            try
+            var res = await PackageStore.StoreAsync(db, blobs, job.Platform, fileName, sha, section.Body, new Package
             {
-                // Never overwrite: an existing blob at this name already holds these bytes (if the hash checks out).
-                await blob.UploadAsync(body, new BlobUploadOptions { Conditions = new BlobRequestConditions { IfNoneMatch = ETag.All } }, ct);
-                wrote = true;
-            }
-            catch (RequestFailedException e) when (e.Status is 409 or 412)
-            {
-                wrote = false;
-                await body.CopyToAsync(Stream.Null, ct); // still hash the rest, to verify the claim
-            }
-            if (body.Sha256Hex != sha)
-            {
-                if (wrote) await blob.DeleteIfExistsAsync(cancellationToken: CancellationToken.None);
-                return BadRequest($"sha256 {sha} does not match the uploaded bytes ({body.Sha256Hex}).");
-            }
-            var result = new { FileName = fileName, Sha256 = sha, Size = body.BytesRead };
-
-            db.Packages.Add(new Package
-            {
-                FileName = fileName, Platform = job.Platform, BlobName = blobName, Size = body.BytesRead, Sha256 = sha, BuildDate = buildDate,
-                UploadedAt = DateTime.UtcNow, RecipeUpdatedAt = job.Recipe!.RecipeUpdatedAt, PortName = job.Recipe.PortName,
+                BuildDate = buildDate, UploadedAt = DateTime.UtcNow, RecipeUpdatedAt = job.Recipe!.RecipeUpdatedAt, PortName = job.Recipe.PortName,
                 BuiltByUserId = client.OwnerId, ClientId = client.Id, JobId = job.Id,
-            });
-            try
+            }, ct);
+            return res.Outcome switch
             {
-                await db.SaveChangesAsync(CancellationToken.None);
-            }
-            catch (DbUpdateException)
-            {
-                // Unique (Platform, FileName): this name is already taken.
-                db.ChangeTracker.Clear();
-                var existing = await db.Packages.AsNoTracking().FirstOrDefaultAsync(p => p.Platform == job.Platform && p.FileName == fileName, CancellationToken.None);
-                if (existing is null) throw;
-                // The blob we wrote is unreferenced unless the existing row points at the same (shared) name.
-                if (wrote && existing.BlobName != blobName) await blob.DeleteIfExistsAsync(cancellationToken: CancellationToken.None);
-                return existing.Sha256 == sha
-                    ? Results.Ok(result)
-                    : Results.Problem(statusCode: 409, title: "Package already exists", detail: $"{job.Platform}/{fileName} exists with different content (sha256 {existing.Sha256}).");
-            }
-            return Results.Ok(result);
+                PackageStore.Outcome.HashMismatch => BadRequest($"sha256 {sha} does not match the uploaded bytes ({res.Sha256})."),
+                PackageStore.Outcome.Conflict => Results.Problem(statusCode: 409, title: "Package already exists",
+                    detail: $"{job.Platform}/{fileName} exists with different content (sha256 {res.ExistingSha256})."),
+                _ => Results.Ok(new { FileName = fileName, Sha256 = sha, res.Size }),
+            };
         }).WithMetadata(new RequestSizeLimitAttribute(MaxUpload + (1 << 20)));
 
         g.MapPost("/{id:long}/complete", async (long id, HttpContext http, AppDbContext db, BlobContainerClient blobs, RepoIndexer indexer) =>

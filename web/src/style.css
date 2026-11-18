@@ -179,8 +179,8 @@ td a { overflow-wrap: anywhere; }
 
 .badge { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .8rem; font-weight: 500; color: #000; white-space: nowrap; }
 .badge-Queued { background: hsl(var(--dot-minimize)); }
-.badge-InProgress { background: hsl(var(--info)); }
-.badge-Succeeded { background: hsl(var(--dot-maximize)); }
+.badge-InProgress, .badge-Running { background: hsl(var(--info)); }
+.badge-Succeeded, .badge-Completed { background: hsl(var(--dot-maximize)); }
 .badge-Failed { background: hsl(var(--dot-close)); }
 .badge-Cancelled { background: hsl(var(--muted-foreground)); }
 .pill { font-family: var(--font-mono); font-size: .8rem; border: 1px solid hsl(var(--border)); border-radius: 999px; padding: 0 .5rem; }

@@ -87,6 +87,16 @@ How it is built (`Services/RepoIndexer.cs`, after `renkuos/bootstrap/arm64/publi
 
 The tools are Linux binaries. The Dockerfile builds them from Haiku source (the `haiku-tools` stage: Haiku's jam from `haiku/buildtools`, then `configure --host-only` and `jam '<build>package_repo' '<build>package'` on the RenkuOS source commit in `HAIKU_COMMIT`) for the image's own architecture, so the arm64 image built here and the amd64 image built for App Service each get matching tools. Without the tools (for example `dotnet run` on macOS) the server works normally but does not build indexes; the dashboard says so and the Reindex endpoint answers 503.
 
+## Importing from another repository
+
+To backfill packages built elsewhere, an admin can import from any pkgman repository on the admin page's Import tab (API: `POST /api/imports` with `{ sourceUrl, platform, dryRun }`, then `GET /api/imports/<id>` for progress, `GET /api/imports` for history, `POST /api/imports/<id>/cancel`). `sourceUrl` is the repository's base URL, the one you would give `pkgman add-repo`; only http and https are accepted.
+
+- The importer downloads `<url>/repo`, checks it against `<url>/repo.sha256` when that exists, and reads it with `package_repo list -f -v`, which prints the repository's architecture and, for every package, its canonical file name and the SHA-256 checksum the repository records for the file. The repository's architecture must be the chosen platform.
+- Packages whose file name this platform does not have yet are the gaps. A dry run lists them and stops.
+- Otherwise each gap is downloaded from `<url>/packages/<file>` (4 at a time, at most 4 GiB each, aborted if no data arrives for 60 s), compared with the repository's checksum, checked with the `package` tool like the indexer does (vendor, architecture, canonical name), and stored through the same code path as client uploads (blob `<platform>/<sha256>/<file>`). A package that fails any step is listed as skipped with the reason; the import goes on. Existing packages are never replaced: a name already taken here is not a gap, and a race with an upload of different content is skipped as "exists with different content".
+- Imported packages are public at once (they have no job) and list "import: <host>" as builder. The port name is the longest known recipe name that prefixes the package name (`inih_devel` gives `inih`), and the recipe date that recipe's; the build date is the import time. The platform's index is rebuilt after the import.
+- One import per platform runs at a time (409 otherwise). Cancel stops after the files in progress. Running the same import again copies only what is still missing. An import whose server stopped is marked Failed when the next one starts; it can simply be run again.
+
 ## Tests
 
 The xUnit integration tests run the real server against the compose SQL Server and Azurite, so start those first. The test database is `RenkuPortsTests` and the blob container `packages-test`; the SA password comes from `RENKUPORTS_TEST_SA_PASSWORD`, defaulting to the one in `.env.example`.
@@ -94,7 +104,7 @@ The xUnit integration tests run the real server against the compose SQL Server a
     docker compose up -d sql azurite
     dotnet test tests/RenkuPorts.Server.Tests
 
-One test runs the real `package` and `package_repo` tools on real hpkgs (create, then an incremental `update -t`, checked with `package_repo list`). On macOS it is reported as skipped. Run it in a Linux container built from the Dockerfile's `tools-test` stage, which has the SDK and the tools and requires them to be present, with a directory of real packages (it uses `packaging-26.2-1-any.hpkg`, `markupsafe-2.1.3-3-arm64.hpkg` and `libbase58_devel-0.1.4-2-arm64.hpkg`):
+Two tests run the real `package` and `package_repo` tools on real hpkgs: index creation plus an incremental `update -t`, and a repository import from a source repository built with `package_repo create` and served over HTTP (dry run, import, re-run, a corrupt file skipped on its checksum, the imported packages in the listing and the regenerated index). On macOS they are reported as skipped. Run the whole suite in a Linux container built from the Dockerfile's `tools-test` stage, which has the SDK and the tools and requires them to be present, on the compose network (so `sql` and `azurite` must be up), with a directory of real packages (it uses `packaging-26.2-1-any.hpkg`, `markupsafe-2.1.3-3-arm64.hpkg` and `libbase58_devel-0.1.4-2-arm64.hpkg`):
 
     tests/run-haiku-tools-test.sh ../build-arm64/build-vm/repo/packages
 

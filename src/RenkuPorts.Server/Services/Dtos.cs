@@ -25,5 +25,5 @@ public static class Project
         c.Owner!.DisplayName, c.Enabled, c.CreatedAt, c.LastSeenAt);
 
     public static readonly Expression<Func<Package, PackageDto>> Package = p => new PackageDto(p.FileName, p.Size, p.Sha256,
-        p.BuildDate, p.UploadedAt, p.RecipeUpdatedAt, p.PortName, p.BuiltBy!.DisplayName);
+        p.BuildDate, p.UploadedAt, p.RecipeUpdatedAt, p.PortName, p.Import != null ? "import: " + p.Import.SourceHost : p.BuiltBy!.DisplayName);
 }

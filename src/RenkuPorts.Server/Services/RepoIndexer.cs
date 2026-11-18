@@ -100,6 +100,9 @@ public sealed class HaikuTools(string dir)
         return output.Split('\n').SkipWhile(l => l.Trim() != "packages:").Skip(1).Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
     }
 
+    /// <summary><c>package_repo list -f -v</c>: the repository info, then each package's attributes followed by its canonical file name.</summary>
+    public Task<string> ListVerboseAsync(string repo, CancellationToken ct) => CheckAsync("package_repo", ["list", "-f", "-v", repo], null, ct);
+
     private async Task<string> CheckAsync(string tool, string[] args, string? cwd, CancellationToken ct)
     {
         var (code, output, error) = await RunAsync(tool, args, cwd, ct);
@@ -133,6 +136,8 @@ public sealed class HaikuTools(string dir)
 public sealed class RepoIndexer(IServiceScopeFactory scopes, BlobContainerClient blobs, IConfiguration cfg, ILogger<RepoIndexer> log) : BackgroundService
 {
     public HaikuTools Tools { get; } = new(cfg["RepoIndex:ToolsPath"] ?? "/opt/haiku-tools");
+    /// <summary>The repositories' vendor; package_repo accepts only packages with this vendor.</summary>
+    public string Vendor => cfg["RepoIndex:Vendor"] ?? "Haiku Project";
     public string DisabledReason => $"Repository indexing is disabled: package_repo and package not found in {Tools.Dir} (RepoIndex:ToolsPath).";
 
     private readonly TimeSpan _debounce = TimeSpan.FromSeconds(cfg.GetValue("RepoIndex:DebounceSeconds", 60));
@@ -243,14 +248,13 @@ public sealed class RepoIndexer(IServiceScopeFactory scopes, BlobContainerClient
             var kept = new List<IndexCandidate>();
             var added = new List<IndexCandidate>();
             var excluded = new List<ExcludedPackage>(rejected);
-            var vendor = cfg["RepoIndex:Vendor"] ?? "Haiku Project";
             foreach (var p in selected)
             {
                 if (prev?.Packages.Contains(p) == true) { kept.Add(p); continue; }
                 if (prev?.Excluded.FirstOrDefault(x => x.FileName == p.FileName && x.Sha256 == p.Sha256) is { } was) { excluded.Add(was); continue; }
                 var path = Path.Combine(pkgDir, p.FileName);
                 await blobs.GetBlobClient(p.BlobName).DownloadToAsync(path, ct);
-                if (await Tools.CheckPackageAsync(path, vendor, platform, ct) is { } reason)
+                if (await Tools.CheckPackageAsync(path, Vendor, platform, ct) is { } reason)
                 {
                     File.Delete(path);
                     excluded.Add(new(p.FileName, p.Sha256, reason));
@@ -298,7 +302,7 @@ public sealed class RepoIndexer(IServiceScopeFactory scopes, BlobContainerClient
         var baseUrl = (cfg["RepoIndex:PublicBaseUrl"] ?? "http://localhost:8080").TrimEnd('/');
         return $"""
             name {cfg["RepoIndex:Name"] ?? "RenkuOSPorts"}
-            vendor "{cfg["RepoIndex:Vendor"] ?? "Haiku Project"}"
+            vendor "{Vendor}"
             summary "{cfg["RepoIndex:Summary"] ?? $"RenkuOSPorts packages for {platform}"}"
             priority {cfg.GetValue("RepoIndex:Priority", 1)}
             baseurl {baseUrl}/repo/{platform}

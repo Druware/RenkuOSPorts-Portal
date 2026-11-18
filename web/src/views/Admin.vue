@@ -83,9 +83,36 @@ async function reindex(platform) {
   } catch (e) { fail(e) }
 }
 
+// ---- Import from another pkgman repository (polled every 3 s while one is running) ----
+const importForm = reactive({ sourceUrl: '', platform: 'arm64' })
+const imports = ref([])
+const current = ref(null)
+let importPoll
+async function loadImports() {
+  try { imports.value = await api('/imports') } catch (e) { fail(e) }
+}
+async function watchImport(id) {
+  clearTimeout(importPoll)
+  try { current.value = await api(`/imports/${id}`) } catch (e) { fail(e); return }
+  if (current.value.status === 'Running') importPoll = setTimeout(() => watchImport(id), 3000)
+  else loadImports()
+}
+async function startImport(dryRun) {
+  try {
+    const { id } = await api('/imports', { method: 'POST', body: { ...importForm, dryRun } })
+    ok(`${dryRun ? 'Dry run' : 'Import'} started.`)
+    await Promise.all([watchImport(id), loadImports()])
+  } catch (e) { fail(e) }
+}
+async function cancelImport(id) {
+  try { await api(`/imports/${id}/cancel`, { method: 'POST' }); ok('Cancelling after the files in progress.') } catch (e) { fail(e) }
+}
+onUnmounted(() => clearTimeout(importPoll))
+
 watch(tab, (t) => {
   notice.value = ''
   if (t === 'dashboard') loadDashboard()
+  if (t === 'import') loadImports()
   if (t === 'jobs') loadJobs()
   if (t === 'recipes' && !recipes.value.length) loadRecipes()
 })
@@ -94,7 +121,7 @@ watch(tab, (t) => {
 <template>
   <h1 class="page-title">Ports dashboard</h1>
   <div class="tabs" role="group" aria-label="Admin sections">
-    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes']]" :key="k" type="button"
+    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes'], ['import', 'Import']]" :key="k" type="button"
       class="tab" :aria-pressed="tab === k" @click="tab = k">{{ label }}</button>
   </div>
 
@@ -210,6 +237,61 @@ watch(tab, (t) => {
       </table>
     </div>
   </HaikuWindow>
+
+  <template v-else-if="tab === 'import'">
+    <HaikuWindow title="Import from a repository">
+      <p class="muted small">Copies the packages a pkgman repository has and this platform lacks (by file name). Each file is checked against the source's checksum and with Haiku's package tool; existing packages are never replaced.</p>
+      <form class="form" @submit.prevent="startImport(false)">
+        <label for="im-url">Repository base URL (as for pkgman add-repo)</label>
+        <input id="im-url" v-model.trim="importForm.sourceUrl" type="url" required placeholder="https://example.org/repo/arm64" autocomplete="off" />
+        <label for="im-platform">Platform</label>
+        <select id="im-platform" v-model="importForm.platform">
+          <option v-for="p in PLATFORMS" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <div class="toolbar">
+          <button type="button" class="btn" :disabled="!importForm.sourceUrl || current?.status === 'Running'" @click="startImport(true)">Dry run</button>
+          <button type="submit" class="btn btn-primary" :disabled="!importForm.sourceUrl || current?.status === 'Running'">Import</button>
+        </div>
+      </form>
+    </HaikuWindow>
+
+    <HaikuWindow v-if="current" :title="`Import ${current.id}${current.dryRun ? ' (dry run)' : ''}`">
+      <div class="failure-head">
+        <StatusBadge :status="current.status" />
+        <span class="pill">{{ current.platform }}</span>
+        <span class="muted small">{{ current.sourceUrl }}</span>
+        <button v-if="current.status === 'Running'" type="button" class="btn btn-small btn-danger" @click="cancelImport(current.id)">Cancel</button>
+      </div>
+      <p aria-live="polite">
+        {{ current.total }} in the source · {{ current.missing }} missing here · {{ current.imported }} imported · {{ current.skipped.length }} skipped
+        <span v-if="current.status === 'Running'" class="muted small">(refreshes every 3 seconds)</span>
+      </p>
+      <p v-if="current.error" class="summary text-danger">{{ current.error }}</p>
+      <details v-if="current.skipped.length" :open="current.skipped.length <= 20">
+        <summary>{{ current.dryRun ? 'Missing packages' : 'Skipped packages' }}</summary>
+        <ul class="small"><li v-for="s in current.skipped" :key="s.fileName"><code>{{ s.fileName }}</code>: {{ s.reason }}</li></ul>
+      </details>
+    </HaikuWindow>
+
+    <HaikuWindow title="Import history">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Started</th><th scope="col">Source</th><th scope="col">Platform</th><th scope="col">Status</th><th scope="col" class="num">Missing</th><th scope="col" class="num">Imported</th><th scope="col" class="num">Skipped</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            <tr v-for="i in imports" :key="i.id">
+              <td class="nowrap">{{ formatDate(i.startedAt) }}<div class="small muted">{{ i.startedBy }}</div></td>
+              <td class="small">{{ i.sourceUrl }}<span v-if="i.dryRun" class="muted"> (dry run)</span></td>
+              <td>{{ i.platform }}</td>
+              <td><StatusBadge :status="i.status" /></td>
+              <td class="num">{{ i.missing }}</td><td class="num">{{ i.imported }}</td><td class="num">{{ i.skipped.length }}</td>
+              <td><button type="button" class="btn btn-small" @click="watchImport(i.id)">Details</button></td>
+            </tr>
+            <tr v-if="!imports.length"><td colspan="8" class="muted">No imports yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </HaikuWindow>
+  </template>
 
   <template v-else>
     <HaikuWindow title="Recipes">

@@ -28,13 +28,14 @@ public class FakeNotifier : INotifier
 /// The server against the compose SQL Server (database RenkuPortsTests, recreated per run) and Azurite
 /// (container packages-test), with a small generated ports tree and a wwwroot holding a stub index.html.
 /// Needs <c>docker compose up -d sql azurite</c>; the SA password comes from RENKUPORTS_TEST_SA_PASSWORD or .env.example's default.
+/// RENKUPORTS_TEST_SQL_SERVER and RENKUPORTS_TEST_BLOB point a run inside a container at them (tests/run-haiku-tools-test.sh).
 /// </summary>
 public class AppFactory : WebApplicationFactory<Program>
 {
     public const string AdminEmail = "admin@renkuos.local";
     public const string AdminPassword = "TestAdmin_Pass1!";
     public static readonly string SqlConnection =
-        $"Server=localhost,14333;Database=RenkuPortsTests;User Id=sa;Password={Environment.GetEnvironmentVariable("RENKUPORTS_TEST_SA_PASSWORD") ?? "RenkuPorts_Local1!"};TrustServerCertificate=True";
+        $"Server={Environment.GetEnvironmentVariable("RENKUPORTS_TEST_SQL_SERVER") ?? "localhost,14333"};Database=RenkuPortsTests;User Id=sa;Password={Environment.GetEnvironmentVariable("RENKUPORTS_TEST_SA_PASSWORD") ?? "RenkuPorts_Local1!"};TrustServerCertificate=True";
 
     public FakeNotifier Mail { get; } = new();
     public string PortsTree { get; }
@@ -60,7 +61,7 @@ public class AppFactory : WebApplicationFactory<Program>
     {
         b.UseEnvironment("Testing");
         b.UseSetting("ConnectionStrings:Sql", SqlConnection);
-        b.UseSetting("ConnectionStrings:Blob", "UseDevelopmentStorage=true");
+        b.UseSetting("ConnectionStrings:Blob", Environment.GetEnvironmentVariable("RENKUPORTS_TEST_BLOB") ?? "UseDevelopmentStorage=true");
         b.UseSetting("Blob:Container", "packages-test");
         b.UseSetting("Jwt:Key", "test-only-jwt-key-0123456789abcdef0123456789");
         b.UseSetting("Seed:AdminEmail", AdminEmail);

@@ -82,4 +82,44 @@ public class Package
     public long? JobId { get; set; }
     /// <summary>The job that uploaded it. A package is public only once this job has Succeeded.</summary>
     public Job? Job { get; set; }
+    /// <summary>Set instead of <see cref="JobId"/> for a package copied from another repository; such a package is public at once.</summary>
+    public long? ImportId { get; set; }
+    public Import? Import { get; set; }
+}
+
+public enum ImportStatus { Running, Completed, Failed, Cancelled }
+
+/// <summary>A copy of the packages another pkgman repository has and this one lacks, for one platform.</summary>
+public class Import
+{
+    public long Id { get; set; }
+    /// <summary>The source repository's base URL, as given to <c>pkgman add-repo</c>.</summary>
+    public string SourceUrl { get; set; } = "";
+    public string SourceHost { get; set; } = "";
+    public string Platform { get; set; } = "";
+    /// <summary>Only count and list the missing packages.</summary>
+    public bool DryRun { get; set; }
+    public ImportStatus Status { get; set; }
+    public DateTime StartedAt { get; set; }
+    public DateTime? FinishedAt { get; set; }
+    /// <summary>Last progress write by the instance running it; a Running import not updated for minutes was interrupted.</summary>
+    public DateTime UpdatedAt { get; set; }
+    public string StartedByUserId { get; set; } = "";
+    public AppUser? StartedBy { get; set; }
+    /// <summary>Set by the cancel endpoint (any instance); the runner stops between files.</summary>
+    public bool CancelRequested { get; set; }
+    /// <summary>Packages in the source repository.</summary>
+    public int Total { get; set; }
+    /// <summary>Source packages whose file name this platform lacked when the import started.</summary>
+    public int Missing { get; set; }
+    public int Imported { get; set; }
+    public List<SkippedPackage> Skipped { get; set; } = [];
+    public string? Error { get; set; }
+}
+
+/// <summary>A missing package an import did not copy, and why.</summary>
+public class SkippedPackage
+{
+    public string FileName { get; set; } = "";
+    public string Reason { get; set; } = "";
 }

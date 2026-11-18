@@ -8,7 +8,7 @@ public static partial class Validate
     /// <summary>Haiku architecture names served by the repo, in display order.</summary>
     public static readonly string[] Platforms = ["x86", "x86_64", "arm64", "riscv64"];
 
-    public static bool IsPlatform(string? p) => p is not null && Platforms.Contains(p);
+    public static bool IsPlatform([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? p) => p is not null && Platforms.Contains(p);
 
     /// <summary>A plain <c>*.hpkg</c> name: no path separators, no leading dot, no "..".</summary>
     public static bool IsHpkgName([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? name) => name is not null && name.Length <= 255 && HpkgName().IsMatch(name) && !name.Contains("..");

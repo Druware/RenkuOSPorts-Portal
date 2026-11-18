@@ -65,6 +65,7 @@ builder.Services.AddSingleton<INotifier>(sp => cfg["Email:Mode"] == "AzureCommun
 // Room for a 5 MB build log sent as a form field to /complete. Package uploads do not use form binding.
 builder.Services.AddSingleton<RepoIndexer>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RepoIndexer>());
+builder.Services.AddSingleton<RepoImporter>();
 
 builder.Services.Configure<FormOptions>(o => o.ValueLengthLimit = 16 << 20);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
@@ -86,6 +87,7 @@ AuthEndpoints.Map(app);
 ClientsEndpoints.Map(app);
 AdminEndpoints.Map(app);
 BuildClientApi.Map(app);
+ImportEndpoints.Map(app);
 
 app.MapFallback("/api/{**rest}", () => Results.NotFound());
 // /repo/{platform} is an SPA route; only the package download path under /repo is the server's.
