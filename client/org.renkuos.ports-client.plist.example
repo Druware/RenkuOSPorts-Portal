@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs this Mac as an arm64 build client. Install:
+    dotnet publish src/RenkuPorts.Client -c Release -o ~/Library/Application\ Support/renkuports-client/bin
+    cp client/appsettings.example.json ~/Library/Application\ Support/renkuports-client/appsettings.json   (fill in ClientId/Secret)
+    cp client/org.renkuos.ports-client.plist.example ~/Library/LaunchAgents/org.renkuos.ports-client.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.renkuos.ports-client.plist
+  A LaunchAgent (not a daemon), because Docker Desktop and Parallels run in the user's session.
+  launchctl bootout sends SIGTERM: the client stops the build (build-stack-arm64.sh runs pause.sh) and reports "client stopped".
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.renkuos.ports-client</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/arsatori/Library/Application Support/renkuports-client/bin/renkuports-client</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/arsatori/Library/Application Support/renkuports-client</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- docker, prlctl and dotnet are not on launchd's default PATH -->
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/local/share/dotnet:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>180</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/arsatori/Library/Logs/renkuports-client.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/arsatori/Library/Logs/renkuports-client.log</string>
+</dict>
+</plist>

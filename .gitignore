@@ -1,0 +1,24 @@
+bin/
+obj/
+node_modules/
+dist/
+.env
+*.user
+.vs/
+.idea/
+TestResults/
+.DS_Store
+
+# AI agent files — local only, never commit
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENTS.local.md
+GEMINI.md
+.claude/
+.codex/
+.cursor/
+.cursorrules
+.windsurf/
+.aider*
+.mcp.json

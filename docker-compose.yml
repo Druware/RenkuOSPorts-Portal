@@ -1,0 +1,52 @@
+# Local stack: SQL Server, Azurite (blob), mailpit (SMTP + UI) and the server image (API + SPA).
+# Secrets come from .env (copy .env.example).
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64   # no arm64 image; runs under Rosetta
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${SA_PASSWORD}
+    ports: ["14333:1433"]
+    volumes: [sql:/var/opt/mssql]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 5s
+      retries: 30
+      start_period: 20s
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: azurite-blob --blobHost 0.0.0.0 --loose --skipApiVersionCheck
+    ports: ["10000:10000"]
+    volumes: [azurite:/data]
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports: ["8025:8025", "1025:1025"]
+
+  web:
+    build: .
+    depends_on:
+      sql: { condition: service_healthy }
+      azurite: { condition: service_started }
+      mailpit: { condition: service_started }
+    environment:
+      ConnectionStrings__Sql: "Server=sql,1433;Database=RenkuPorts;User Id=sa;Password=${SA_PASSWORD};TrustServerCertificate=True"
+      ConnectionStrings__Blob: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+      Email__Mode: Smtp
+      Email__Smtp__Host: mailpit
+      Email__Smtp__Port: "1025"
+      Jwt__Key: ${JWT_KEY}
+      Seed__AdminEmail: ${ADMIN_EMAIL}
+      Seed__AdminPassword: ${ADMIN_PASSWORD}
+      Auth__GitHub__ClientId: ${GITHUB_CLIENT_ID:-}
+      Auth__GitHub__ClientSecret: ${GITHUB_CLIENT_SECRET:-}
+      PortsTree__Path: /ports
+    ports: ["8080:8080"]
+    volumes:
+      - ../RenkuOSPorts:/ports:ro
+
+volumes:
+  sql:
+  azurite:

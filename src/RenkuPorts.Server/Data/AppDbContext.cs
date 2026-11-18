@@ -1,0 +1,70 @@
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+
+namespace RenkuPorts.Server.Data;
+
+public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbContext<AppUser>(options)
+{
+    public DbSet<BuildClient> BuildClients => Set<BuildClient>();
+    public DbSet<Recipe> Recipes => Set<Recipe>();
+    public DbSet<Job> Jobs => Set<Job>();
+    public DbSet<Package> Packages => Set<Package>();
+
+    /// <summary>All times are UTC; SQL Server drops the Kind, so mark values read back as UTC (JSON then ends in "Z").</summary>
+    protected override void ConfigureConventions(ModelConfigurationBuilder c)
+    {
+        c.Properties<DateTime>().HaveConversion<UtcConverter>();
+        c.Properties<DateTime?>().HaveConversion<UtcConverter>();
+    }
+
+    private sealed class UtcConverter() : Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<DateTime, DateTime>(
+        v => v.ToUniversalTime(), v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
+
+    protected override void OnModelCreating(ModelBuilder b)
+    {
+        base.OnModelCreating(b);
+
+        b.Entity<BuildClient>(e =>
+        {
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.SecretHash).HasMaxLength(64);
+            e.HasOne(x => x.Owner).WithMany().HasForeignKey(x => x.OwnerId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        b.Entity<Recipe>(e =>
+        {
+            e.Property(x => x.PortName).HasMaxLength(200);
+            e.Property(x => x.Category).HasMaxLength(100);
+            e.Property(x => x.Version).HasMaxLength(100);
+            e.Property(x => x.RecipePath).HasMaxLength(400);
+            e.HasIndex(x => x.RecipePath).IsUnique();
+            e.HasIndex(x => new { x.PortName, x.Version });
+        });
+
+        b.Entity<Job>(e =>
+        {
+            // Status is stored as text; the claim SQL in BuildClientApi depends on these names.
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.FailureSummary).HasMaxLength(2000);
+            e.HasIndex(x => new { x.Status, x.Platform, x.QueuedAt });
+            e.HasOne(x => x.Recipe).WithMany().HasForeignKey(x => x.RecipeId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.QueuedBy).WithMany().HasForeignKey(x => x.QueuedByUserId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.ClaimedBy).WithMany().HasForeignKey(x => x.ClaimedByClientId).OnDelete(DeleteBehavior.SetNull);
+            e.HasMany(x => x.Packages).WithOne(p => p.Job).HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.NoAction);
+        });
+
+        b.Entity<Package>(e =>
+        {
+            e.Property(x => x.FileName).HasMaxLength(255);
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.Sha256).HasMaxLength(64);
+            e.Property(x => x.BlobName).HasMaxLength(400);
+            e.Property(x => x.PortName).HasMaxLength(200);
+            e.HasIndex(x => new { x.Platform, x.FileName }).IsUnique();
+            e.HasOne(x => x.BuiltBy).WithMany().HasForeignKey(x => x.BuiltByUserId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<BuildClient>().WithMany().HasForeignKey(x => x.ClientId).OnDelete(DeleteBehavior.SetNull);
+        });
+    }
+}
