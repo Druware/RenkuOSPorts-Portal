@@ -11,7 +11,7 @@ On RenkuOS/Haiku with `haiku_devel`, `makefile_engine`, `gcc` and `make` install
     make OBJ_DIR=objects      # or a fixed output directory
     make install              # copies it to ~/config/non-packaged/apps
 
-It links `libbe`, `libbnetapi`, the static `libnetservices.a` (HTTP) and `libshared.a` (JSON), all part of `haiku_devel`. `renkuports_builder.recipe` is a draft HaikuPorts recipe for packaging it later (it needs a source commit and checksum, and a `renkuports_builder-<version>.recipe` file name, before it goes into the ports tree).
+It links `libbe`, `libbnetapi`, the static `libnetservices.a` (HTTP) and `libshared.a` (JSON), all part of `haiku_devel`. `renkuports_builder-0.1.1.recipe` is the HaikuPorts recipe for this release, built from the `v0.1.1` tag archive; it belongs in the ports tree at `haiku-apps/renkuports_builder/`. Build it there with `haikuporter -y --no-source-packages --get-dependencies renkuports_builder`. For a new release, tag it, rename the recipe to the new version and update `CHECKSUM_SHA256` to the sha256 of the new tag archive.
 
 ## Configure
 
