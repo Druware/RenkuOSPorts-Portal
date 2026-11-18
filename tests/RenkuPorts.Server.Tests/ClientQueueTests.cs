@@ -13,7 +13,8 @@ public partial class ApiTests
     private record ClientJobView(long Id, string PortName, string Platform, string Status, int Priority, string? ClaimedBy, bool Mine, bool SameOwner,
         long? QueuePosition, List<string> WaitingOn, int WaitingOnCount, bool InMyChain, bool InOwnerChain, int? Unblocks);
     private record OwnerClientView(string Name, string Platform, DateTime? LastSeenAt, long? CurrentJobId);
-    private record ClientSelfView(Guid Id, string Name, string Platform, string Owner, ClientJobView? CurrentJob, List<OwnerClientView> OwnerClients);
+    private record PortsRepoView(string Url, string Branch);
+    private record ClientSelfView(Guid Id, string Name, string Platform, string Owner, ClientJobView? CurrentJob, List<OwnerClientView> OwnerClients, PortsRepoView? PortsRepo);
 
     private static async Task<PageView<ClientJobView>> ClientJobsAsync(HttpClient client, string query = "") =>
         (await client.GetFromJsonAsync<PageView<ClientJobView>>("/api/client/jobs" + query))!;
@@ -157,6 +158,18 @@ public partial class ApiTests
         var idle = (await cz.GetFromJsonAsync<ClientSelfView>("/api/client/me"))!;
         Assert.Null(idle.CurrentJob);
         Assert.Single(idle.OwnerClients);
+    }
+
+    [Fact]
+    public async Task Client_me_names_the_ports_repository_only_when_the_server_has_one()
+    {
+        var (_, client) = await app.BuildClientAsync(await app.SignedInAsync());
+        Assert.Null((await client.GetFromJsonAsync<ClientSelfView>("/api/client/me"))!.PortsRepo);
+
+        using var gitApp = app.WithWebHostBuilder(b => b.UseSetting("PortsTree:GitUrl", "https://git.example.org/ports.git"));
+        var git = gitApp.CreateClient();
+        git.DefaultRequestHeaders.Authorization = client.DefaultRequestHeaders.Authorization; // same signing key
+        Assert.Equal(new PortsRepoView("https://git.example.org/ports.git", "main"), (await git.GetFromJsonAsync<ClientSelfView>("/api/client/me"))!.PortsRepo);
     }
 
     [Fact]

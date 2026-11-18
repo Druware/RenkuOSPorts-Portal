@@ -2,11 +2,12 @@ resource app_signature "application/x-vnd.RenkuOS-PortsBuilder";
 
 resource app_flags B_SINGLE_LAUNCH;
 
+// 0.1.1: keep in step with APP_VERSION in Builder.h; a release tag vX.Y.Z uses B_APPV_FINAL, internal 0.
 resource app_version {
 	major = 0,
 	middle = 1,
-	minor = 0,
-	variety = B_APPV_DEVELOPMENT,
+	minor = 1,
+	variety = B_APPV_FINAL,
 	internal = 0,
 	short_info = "RenkuPorts Builder",
 	long_info = "RenkuOSPorts build client for RenkuOS"

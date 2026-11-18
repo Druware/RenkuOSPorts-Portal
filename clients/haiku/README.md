@@ -16,16 +16,16 @@ It links `libbe`, `libbnetapi`, the static `libnetservices.a` (HTTP) and `libsha
 ## Configure
 
 1. In the portal, open Clients and create a build client with a name and the platform of this machine (for example `arm64`). Copy the id and the secret; the secret is shown only once.
-2. Have a RenkuOSPorts checkout (a git clone, so the client can update it) and a HaikuPorter config file whose `TREE_PATH` points at it, for example `~/config/settings/haikuports.conf` with `TREE_PATH`, `PACKAGER` and `TARGET_ARCHITECTURE`.
+2. Optional: the ports tree and the HaikuPorter config. When the portal has a ports repository (`PortsTree:GitUrl`, shown to clients by `/api/client/me` as `portsRepo`), the client clones the whole tree (HaikuPorter needs every recipe to resolve dependencies) into the Ports tree directory on the first job, and writes a HaikuPorter config into the work directory when none is configured. Have your own checkout or config only if you want to use them; an existing config file is used unchanged.
 3. Start RenkuPorts Builder. With no settings saved yet it opens on the Settings tab:
 
 | Field | Meaning |
 |---|---|
 | Server URL | The portal, e.g. `https://ports.example.org/` (http works for a local test server). Redirects are not followed, so give the final URL. |
 | Client id, Secret | From step 1. |
-| Ports tree | The RenkuOSPorts checkout. Packages are collected from its `packages/` directory. |
+| Ports tree | The RenkuOSPorts checkout, `~/RenkuOSPorts` by default (also when empty); cloned there if it is not a git checkout yet. Packages are collected from its `packages/` directory. |
 | HaikuPorter command | `haikuporter` or a full path. |
-| HaikuPorter config | Passed as `--config=`; its `TREE_PATH` must be the ports tree above. |
+| HaikuPorter config | Empty by default. A file given here is passed as `--config=` unchanged, and its `TREE_PATH` must be the ports tree above. When it is empty or the file does not exist, `<work directory>/haikuports.conf` is written each job with `TREE_PATH` (the ports tree), `TARGET_ARCHITECTURE` (the job's platform; `x86` becomes `x86_gcc2`) and `PACKAGER="RenkuPorts Builder <client name> <noreply@renkuos.org>"`. |
 | Jobs (-j) | Passed to HaikuPorter as `-j<n>`. |
 | Work directory | Per-job directories `job-<id>/` with `build.log`. |
 | Start building when the application starts | Runs Start on launch, e.g. with the app in `~/config/settings/boot/launch`. |
@@ -45,8 +45,8 @@ The buttons can also be pressed from a shell: `hey application/x-vnd.RenkuOS-Por
 ## What a job does
 
 1. Claims the job (`POST /api/client/jobs/next`).
-2. If the ports tree is a git checkout, runs `git pull --ff-only` and logs the commit it builds (the job names no commit, so this builds the branch tip; a failed pull is logged and the tree is built as it is). It warns if the job's recipe path is missing from the tree.
-3. Runs `haikuporter --config=<config> -y --no-source-packages --get-dependencies -j<n> <port>-<version>` with output to `build.log` and the window.
+2. Updates the ports tree to the tip of the portal's branch (the job names no commit) and logs the commit it builds. With a `portsRepo` from `/api/client/me`: if the tree is not a git checkout it runs `git clone --depth 1 --branch <branch>` (a failed clone fails the job); otherwise `git remote set-url origin <url>`, `git fetch --depth 1 origin <branch>` and `git reset --hard FETCH_HEAD`, which discards local changes to tracked files (a failed update is logged and the tree is built as it is). It never runs `git clean`, so the built packages in `packages/` (untracked) are kept. Without a `portsRepo` it runs `git pull --ff-only` in a checkout, or builds a plain directory as it is. It warns if the job's recipe path is missing from the tree.
+3. Writes the HaikuPorter config if needed (see Settings) and runs `haikuporter --config=<config> -y --no-source-packages --get-dependencies -j<n> <port>-<version>` with output to `build.log` and the window.
 4. Collects the `*.hpkg` files HaikuPorter added to or rewrote in `packages/` during the run (the port's packages and any dependencies built with it; `*-source.hpkg` excluded). If HaikuPorter exited 0 but wrote nothing because the packages already existed, it takes `<port>-<version>-*` and `<port>_*-<version>-*` from `packages/`, as `client/scripts/build-stack-arm64.sh` does.
 5. Uploads each one as multipart (`sha256` and `buildDate` fields before the `file` part), streamed from disk with its SHA-256 computed by `sha256sum`.
 6. Completes the job with the last 5 MB of the log, or fails it with a summary (non-zero exit, no packages, upload error) and the log.

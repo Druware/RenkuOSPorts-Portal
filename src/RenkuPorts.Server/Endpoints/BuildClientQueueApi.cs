@@ -64,7 +64,7 @@ public static partial class BuildClientApi
             return Results.Ok(result with { Items = await WithChainsAsync(db, client, result.Items) });
         });
 
-        api.MapGet("/me", async (HttpContext http, AppDbContext db) =>
+        api.MapGet("/me", async (HttpContext http, AppDbContext db, IConfiguration cfg) =>
         {
             var client = (BuildClient)http.Items[ClientItem]!;
             var owner = await db.Users.Where(u => u.Id == client.OwnerId).Select(u => u.DisplayName).FirstOrDefaultAsync() ?? "";
@@ -75,8 +75,10 @@ public static partial class BuildClientApi
                     .Where(j => j.ClaimedByClientId == c.Id && j.Status == JobStatus.InProgress)
                     .OrderByDescending(j => j.ClaimedAt).Select(j => (long?)j.Id).FirstOrDefault()))
                 .ToListAsync();
+            // The same repository and branch default as the recipe sync, so clients build the tree the server scanned.
+            var repo = cfg["PortsTree:GitUrl"] is { Length: > 0 } url ? new PortsRepoDto(url, cfg["PortsTree:Branch"] ?? "main") : null;
             return Results.Ok(new ClientSelfDto(client.Id, client.Name, client.Platform, owner,
-                (await WithChainsAsync(db, client, current)).FirstOrDefault(), clients));
+                (await WithChainsAsync(db, client, current)).FirstOrDefault(), clients, repo));
         });
     }
 

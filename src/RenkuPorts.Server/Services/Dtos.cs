@@ -43,8 +43,11 @@ public record ClientJobDto(long Id, string PortName, string Version, string Plat
 
 public record OwnerClientDto(string Name, string Platform, DateTime? LastSeenAt, long? CurrentJobId);
 
-/// <summary>The calling build client, the job it is building and every client of its owner.</summary>
-public record ClientSelfDto(Guid Id, string Name, string Platform, string Owner, ClientJobDto? CurrentJob, List<OwnerClientDto> OwnerClients);
+/// <summary>The git repository and branch of the ports tree the server scans (PortsTree:GitUrl and PortsTree:Branch).</summary>
+public record PortsRepoDto(string Url, string Branch);
+
+/// <summary>The calling build client, the job it is building, every client of its owner and the ports repository to build from (null when the server reads a local tree).</summary>
+public record ClientSelfDto(Guid Id, string Name, string Platform, string Owner, ClientJobDto? CurrentJob, List<OwnerClientDto> OwnerClients, PortsRepoDto? PortsRepo);
 
 /// <summary>A recipe;<see cref="Priority"/>, <see cref="Dependents"/> and <see cref="Outstanding"/> are its port's <see cref="Data.PortPriority"/>
 /// on the platform the list was asked for, null without one or before the port's priority is computed.</summary>

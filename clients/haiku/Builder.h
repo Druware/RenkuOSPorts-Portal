@@ -17,7 +17,8 @@
 #include <String.h>
 
 #define APP_SIGNATURE "application/x-vnd.RenkuOS-PortsBuilder"
-#define APP_VERSION "0.1.0"
+/** The package version (Haiku syntax, `~` marks a pre-release); keep it in step with app_version in Builder.rdef and the git tag. */
+#define APP_VERSION "0.1.1"
 
 /** Messages from the worker (and the connection test) to the window. */
 enum {
@@ -36,9 +37,9 @@ struct Settings {
 	BString server = "http://localhost:8080/";
 	BString clientId;
 	BString secret;
-	BString treePath = "/boot/home/haikuports";
+	BString treePath = "/boot/home/RenkuOSPorts";	//!< cloned from the server's portsRepo when missing; empty means this default
 	BString haikuporter = "haikuporter";
-	BString haikuporterConfig = "/boot/home/config/settings/haikuports.conf";
+	BString haikuporterConfig;	//!< generated in workDir when empty or missing; a machine's own haikuports.conf may point TREE_PATH at another tree
 	int32 jobs = 4;
 	BString workDir = "/boot/home/renkuports-builder-work";
 	bool runOnStart = false;

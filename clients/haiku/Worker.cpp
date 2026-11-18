@@ -6,6 +6,7 @@
  */
 #include "Builder.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -221,35 +222,96 @@ Worker::_ProcessJob(const BMessage& job)
 		recipe.String(), buildNumber.String());
 
 	bool fake = !fSettings.buildCommand.IsEmpty();
-	BString tree = fSettings.treePath, packages = BString(tree) << "/packages";
+	BString tree = fSettings.treePath.IsEmpty() ? Settings().treePath : fSettings.treePath;
+	BString packages = BString(tree) << "/packages";
 	std::vector<BString> env = {BString("RENKUPORTS_PLATFORM=") << platform,
 		BString("RENKUPORTS_JOB_ID=") << id, BString("RENKUPORTS_RECIPE_PATH=") << recipe};
 	std::vector<BString> argv;
 	std::map<BString, time_t> before;
+	BString setupError;	//!< fails the job without running the build
 	if (fake) {
 		argv = {fSettings.buildCommand, port, version, outDir};
 	} else {
-		// The job names no commit, so build the tip of the checkout's branch: fast-forward only, never discard
-		// local changes. A failed update is logged and the checkout is built as it is.
-		if (access((BString(tree) << "/.git").String(), F_OK) == 0) {
+		// The ports repository the server scans (portsRepo is null when it reads a local tree).
+		BString repoUrl, branch, clientName, error;
+		HttpResponse meReply;
+		BMessage me, repo;
+		if (fApi.Call("GET", "api/client/me", meReply, error) == B_OK && BJson::Parse(meReply.body, me) == B_OK) {
+			clientName = me.GetString("name", "");
+			if (me.FindMessage("portsRepo", &repo) == B_OK) {
+				repoUrl = repo.GetString("url", "");
+				branch = repo.GetString("branch", "main");
+			}
+		} else
+			_Log("warning: cannot read api/client/me (%s); building the ports tree as it is",
+				error.IsEmpty() ? "unreadable reply" : error.String());
+
+		// The job names no commit, so build the tip of the branch. Never git clean: packages/ holds the built
+		// packages (untracked) and must survive. A failed update is logged and the checkout is built as it is.
+		bool checkout = access((BString(tree) << "/.git").String(), F_OK) == 0;
+		if (!checkout && !repoUrl.IsEmpty()) {
+			_Log("cloning %s (branch %s) into %s", repoUrl.String(), branch.String(), tree.String());
+			if (_Run({"git", "clone", "--quiet", "--depth", "1", "--branch", branch, "--", repoUrl, tree}, {}) == 0)
+				checkout = true;
+			else
+				setupError.SetToFormat("cannot clone the ports tree %s into %s", repoUrl.String(), tree.String());
+		} else if (checkout && !repoUrl.IsEmpty()) {
+			// The server's repository and branch, depth 1, reset to its tip (discards local changes to tracked files).
+			if (_Run({"git", "-C", tree, "remote", "set-url", "origin", repoUrl}, {}) != 0
+				|| _Run({"git", "-C", tree, "fetch", "--quiet", "--depth", "1", "origin", branch}, {}) != 0
+				|| _Run({"git", "-C", tree, "reset", "--quiet", "--hard", "FETCH_HEAD"}, {}) != 0)
+				_Log("warning: updating the ports tree from %s failed; building it as it is", repoUrl.String());
+		} else if (checkout) {
 			if (_Run({"git", "-C", tree, "pull", "--ff-only"}, {}) != 0)
 				_Log("warning: git pull --ff-only failed; building the ports tree as it is");
+		}
+		if (checkout) {
 			BString head;
 			_Run({"git", "-C", tree, "rev-parse", "HEAD"}, {}, &head);
 			_Log("ports tree %s at commit %s", tree.String(), head.Trim().String());
-		} else
+		} else if (setupError.IsEmpty())
 			_Log("ports tree %s is not a git checkout; building it as it is", tree.String());
-		if (access((BString(tree) << "/" << recipe).String(), R_OK) != 0)
+		if (setupError.IsEmpty() && access((BString(tree) << "/" << recipe).String(), R_OK) != 0)
 			_Log("warning: recipe %s not found in the ports tree", recipe.String());
+
+		// A user's existing config is used unchanged; otherwise one is written each job, so TREE_PATH follows the setting.
+		BString config = fSettings.haikuporterConfig;
+		if (setupError.IsEmpty() && (config.IsEmpty() || access(config.String(), F_OK) != 0)) {
+			config = BString(fSettings.workDir) << "/haikuports.conf";
+			// HaikuPorter's name for 32-bit x86 as the primary architecture.
+			BString arch = platform == "x86" ? BString("x86_gcc2") : platform;
+			// The config is read by a shell: keep the client name to characters that need no quoting.
+			BString packager("RenkuPorts Builder");
+			if (!clientName.IsEmpty())
+				packager << " ";
+			for (int32 i = 0; i < clientName.Length(); i++) {
+				char c = clientName.ByteAt(i);
+				packager << (isalnum((unsigned char)c) || c == ' ' || c == '.' || c == '_' || c == '-' ? c : '_');
+			}
+			FILE* f = fopen(config.String(), "w");
+			bool written = f != NULL
+				&& fprintf(f, "TREE_PATH=\"%s\"\nTARGET_ARCHITECTURE=\"%s\"\nPACKAGER=\"%s <noreply@renkuos.org>\"\n",
+					tree.String(), arch.String(), packager.String()) > 0;
+			if (f != NULL && fclose(f) != 0)
+				written = false;
+			if (written)
+				_Log("HaikuPorter config %s written (TREE_PATH %s, TARGET_ARCHITECTURE %s)", config.String(),
+					tree.String(), arch.String());
+			else
+				setupError.SetToFormat("cannot write the HaikuPorter config %s", config.String());
+		}
 		before = list_hpkgs(packages);
-		argv = {fSettings.haikuporter, BString("--config=") << fSettings.haikuporterConfig, "-y",
+		argv = {fSettings.haikuporter, BString("--config=") << config, "-y",
 			"--no-source-packages", "--get-dependencies", BString("-j") << fSettings.jobs, name};
 	}
-	BString line("running:");
-	for (const BString& a : argv)
-		line << " " << a;
-	_Log("%s", line.String());
-	int exitCode = _Run(argv, env);
+	int exitCode = 1;
+	if (setupError.IsEmpty()) {
+		BString line("running:");
+		for (const BString& a : argv)
+			line << " " << a;
+		_Log("%s", line.String());
+		exitCode = _Run(argv, env);
+	}
 
 	// The packages to upload: the test command's out dir, or what HaikuPorter added to or rewrote in the
 	// tree's packages/ (the port's packages and any dependencies built in the same run).
@@ -273,6 +335,8 @@ Worker::_ProcessJob(const BMessage& job)
 	BString summary;
 	if (fStop)
 		summary = "client stopped";
+	else if (!setupError.IsEmpty())
+		summary = setupError;
 	else if (exitCode != 0)
 		summary.SetToFormat("build command exited with code %d", exitCode);
 	else if (files.empty())
