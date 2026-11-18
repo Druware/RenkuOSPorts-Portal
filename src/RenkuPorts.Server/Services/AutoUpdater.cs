@@ -20,7 +20,7 @@ public record AutoUpdateResult(DateTime FinishedAt, string? FromCommit, string? 
 /// yet. Runs every <see cref="AutoUpdateSettings.IntervalHours"/> while enabled, or on demand. One atomic UPDATE on the settings
 /// row claims a run, so only one instance runs it.
 /// </summary>
-public sealed partial class AutoUpdater(IServiceScopeFactory scopes, IConfiguration cfg, ILogger<AutoUpdater> log) : BackgroundService
+public sealed partial class AutoUpdater(IServiceScopeFactory scopes, PriorityComputer priorities, IConfiguration cfg, ILogger<AutoUpdater> log) : BackgroundService
 {
     /// <summary>A run claimed longer ago than this is assumed dead (its server stopped) and may be claimed again.</summary>
     public static readonly TimeSpan StaleAfter = TimeSpan.FromHours(1);
@@ -97,6 +97,7 @@ public sealed partial class AutoUpdater(IServiceScopeFactory scopes, IConfigurat
             // As the recipe sync: fetch with PortsTree:GitUrl, else read the local checkout as it is (the compose mount is read-only).
             if (cfg["PortsTree:GitUrl"] is { Length: > 0 } url) await RecipeScanner.UpdateCheckoutAsync(root, url, cfg["PortsTree:Branch"] ?? "main");
             await RecipeScanner.SyncAsync(db, root, log);
+            priorities.RequestNow();
             head = (await RecipeScanner.GitAsync(root, "rev-parse", "HEAD")).Trim();
         }
         finally

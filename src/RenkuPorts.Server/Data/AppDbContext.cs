@@ -11,6 +11,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Package> Packages => Set<Package>();
     public DbSet<Import> Imports => Set<Import>();
     public DbSet<AutoUpdateSettings> AutoUpdateSettings => Set<AutoUpdateSettings>();
+    public DbSet<PortPriority> PortPriorities => Set<PortPriority>();
+    public DbSet<PortDependency> PortDependencies => Set<PortDependency>();
 
     /// <summary>All times are UTC; SQL Server drops the Kind, so mark values read back as UTC (JSON then ends in "Z").</summary>
     protected override void ConfigureConventions(ModelConfigurationBuilder c)
@@ -76,6 +78,24 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             e.Property(x => x.Platforms).HasMaxLength(100);
             e.Property(x => x.LastCommit).HasMaxLength(64);
             e.HasData(new AutoUpdateSettings { Id = Data.AutoUpdateSettings.SingletonId, Enabled = false, IntervalHours = 6, Platforms = "arm64" });
+        });
+
+        b.Entity<PortPriority>(e =>
+        {
+            // The job claim SQL in BuildClientApi reads this table by these names.
+            e.HasKey(x => new { x.Platform, x.PortName });
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.PortName).HasMaxLength(200);
+            e.HasIndex(x => new { x.Platform, x.Priority });
+            e.HasOne(x => x.Recipe).WithMany().HasForeignKey(x => x.RecipeId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        b.Entity<PortDependency>(e =>
+        {
+            e.HasKey(x => new { x.Platform, x.PortName, x.DependsOn });
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.PortName).HasMaxLength(200);
+            e.Property(x => x.DependsOn).HasMaxLength(200);
         });
 
         b.Entity<Import>(e =>

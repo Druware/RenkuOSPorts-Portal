@@ -1,10 +1,14 @@
 <script setup>
-import { watch } from 'vue'
+import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { store, api, isAdmin } from './api.js'
 
 const route = useRoute()
 const router = useRouter()
+
+// The server's build version, so the footer always shows what is actually deployed.
+const version = ref('')
+api('/version').then(v => { version.value = v.version }, () => {})
 
 // A 401 anywhere clears the user; leave protected pages when that happens.
 watch(() => store.user, (user) => {
@@ -41,7 +45,7 @@ async function signOut() {
     <RouterView />
   </main>
   <footer class="site-footer">
-    <span>RenkuOSPorts — the RenkuOS fork of HaikuPorts.</span>
+    <span>RenkuOSPorts — the RenkuOS fork of HaikuPorts.<template v-if="version"> v{{ version }}</template></span>
     <a href="https://renkuos.org">renkuos.org</a>
   </footer>
 </template>

@@ -58,15 +58,53 @@ const recipesLoading = ref(false)
 const selected = ref(null) // kept across pages and searches
 const targets = ref([...PLATFORMS])
 const syncing = ref(false)
+const prioPlatform = ref('arm64') // the platform whose build priority the list shows
+const recipeSort = ref('name')
 let recipeTimer
 async function loadRecipes() {
-  const q = new URLSearchParams({ page: String(recipePage.value) })
+  const q = new URLSearchParams({ page: String(recipePage.value), platform: prioPlatform.value, sort: recipeSort.value })
   if (recipeSearch.value.trim()) q.set('search', recipeSearch.value.trim())
   recipesLoading.value = true
   try { recipes.value = await api(`/recipes?${q}`) } catch (e) { fail(e) } finally { recipesLoading.value = false }
 }
 watch(recipeSearch, () => { clearTimeout(recipeTimer); recipeTimer = setTimeout(() => { recipePage.value = 1; loadRecipes() }, 250) })
 function goToRecipePage(p) { recipePage.value = p; loadRecipes() }
+watch([prioPlatform, recipeSort], () => { recipePage.value = 1; loadRecipes() })
+
+// ---- Build priority (outstanding ports that need a port built first; polled every 5 s after Recompute) ----
+const prio = ref(null)
+const topN = ref(20)
+const prioBusy = ref(false)
+let prioPoll
+const prioFor = (p) => prio.value?.platforms.find((x) => x.platform === p)
+async function loadPrio() {
+  try { prio.value = await api('/priorities') } catch (e) { fail(e) }
+}
+function watchPrio(before, tries = 120) {
+  clearTimeout(prioPoll)
+  prioPoll = setTimeout(async () => {
+    await loadPrio()
+    if (prioFor(prioPlatform.value)?.computedAt !== before && !prio.value?.running) { ok('Build priorities recomputed.'); loadRecipes() }
+    else if (prio.value?.lastError) fail(new Error(`Computing build priorities failed: ${prio.value.lastError}`))
+    else if (tries > 1) watchPrio(before, tries - 1)
+  }, 5000)
+}
+async function recompute() {
+  const before = prioFor(prioPlatform.value)?.computedAt
+  try {
+    await api('/priorities/recompute', { method: 'POST' })
+    ok('Recomputing build priorities; this takes a minute or more after recipe changes.')
+    watchPrio(before)
+  } catch (e) { fail(e) }
+}
+async function queueTop() {
+  prioBusy.value = true
+  try {
+    const created = await api(`/priorities/${prioPlatform.value}/queue-top`, { method: 'POST', body: { count: topN.value } })
+    ok(created.length ? `Queued ${created.length} job(s) for ${prioPlatform.value}: ${created.map((j) => j.portName).join(', ')}.` : `Nothing outstanding to queue for ${prioPlatform.value}.`)
+  } catch (e) { fail(e) } finally { prioBusy.value = false }
+}
+onUnmounted(() => clearTimeout(prioPoll))
 
 // ---- Automatic updates (queue changed ports on a schedule) ----
 const auto = ref(null)
@@ -189,7 +227,7 @@ watch(tab, (t) => {
   if (t === 'import') loadImports()
   if (t === 'jobs') loadJobs()
   if (t === 'packages') loadPackages()
-  if (t === 'recipes') { if (!recipes.value.items.length) loadRecipes(); loadAuto() }
+  if (t === 'recipes') { if (!recipes.value.items.length) loadRecipes(); loadAuto(); loadPrio() }
 })
 </script>
 
@@ -444,22 +482,49 @@ watch(tab, (t) => {
       </div>
     </HaikuWindow>
 
+    <HaikuWindow title="Build priority">
+      <p class="muted small">A port's priority is the number of outstanding ports (stable on the platform, nothing published there yet) that need it built first, directly or through other outstanding ports. Builds are claimed highest priority first, then oldest. Priorities are recomputed after a recipe sync and a few minutes after packages are published or deleted.</p>
+      <div class="toolbar">
+        <label for="bp-platform">Platform</label>
+        <select id="bp-platform" v-model="prioPlatform">
+          <option v-for="p in PLATFORMS" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <span class="small" aria-live="polite">
+          Computed {{ formatDate(prioFor(prioPlatform)?.computedAt) }} · {{ prioFor(prioPlatform)?.outstanding ?? 0 }} outstanding<span v-if="prio?.running" class="muted"> · computing…</span>
+        </span>
+        <button type="button" class="btn btn-small" :disabled="prio?.running" @click="recompute">Recompute</button>
+      </div>
+      <p v-if="prio?.lastError" class="summary text-danger">{{ prio.lastError }}</p>
+      <form class="toolbar" @submit.prevent="queueTop">
+        <label for="bp-count">Count</label>
+        <input id="bp-count" v-model.number="topN" type="number" min="1" max="200" required class="input-narrow" />
+        <button class="btn btn-primary" type="submit" :disabled="prioBusy">Queue top {{ topN }} outstanding for {{ prioPlatform }}</button>
+      </form>
+    </HaikuWindow>
+
     <HaikuWindow title="Recipes">
       <div class="toolbar">
         <label for="rc-search">Search recipes</label>
         <input id="rc-search" v-model="recipeSearch" type="search" autocomplete="off" />
+        <label for="rc-sort">Sort by</label>
+        <select id="rc-sort" v-model="recipeSort">
+          <option value="name">Name</option>
+          <option value="priority">Priority on {{ prioPlatform }}</option>
+        </select>
         <button type="button" class="btn btn-small" :disabled="syncing" @click="sync">{{ syncing ? 'Syncing…' : 'Sync ports tree' }}</button>
       </div>
       <div class="table-wrap">
         <table :class="{ loading: recipesLoading }" :aria-busy="recipesLoading">
-          <thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Port</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Recipe updated</th></tr></thead>
+          <thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Port</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Recipe updated</th><th scope="col" class="num">Priority</th><th scope="col" class="num">Dependents</th></tr></thead>
           <tbody>
             <tr v-for="r in recipes.items" :key="r.id" :class="{ selected: selected?.id === r.id }">
               <td><input type="radio" name="recipe" :id="`rc-${r.id}`" :checked="selected?.id === r.id" @change="selected = r" /></td>
               <td><label :for="`rc-${r.id}`">{{ r.portName }}</label></td>
               <td>{{ r.version }}</td><td>{{ r.category }}</td><td class="nowrap">{{ formatDate(r.recipeUpdatedAt) }}</td>
+              <td class="num" :class="{ muted: r.outstanding === false }" :title="r.outstanding === false ? 'Not outstanding: published already, or not stable on this platform' : ''">{{ r.priority ?? '—' }}</td>
+              <td class="num">{{ r.dependents ?? '—' }}</td>
             </tr>
-            <tr v-if="!recipesLoading && !recipes.items.length"><td colspan="5" class="muted">{{ recipes.total ? 'No recipes on this page.' : 'No recipes found. Try syncing the ports tree.' }}</td></tr>
+            <tr v-if="!recipesLoading && !recipes.items.length"><td colspan="7" class="muted">{{ recipes.total ? 'No recipes on this page.' : 'No recipes found. Try syncing the ports tree.' }}</td></tr>
           </tbody>
         </table>
       </div>

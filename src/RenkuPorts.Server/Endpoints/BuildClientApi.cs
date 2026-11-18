@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Security.Claims;
 using Azure.Storage.Blobs;
@@ -29,7 +30,7 @@ public static partial class BuildClientApi
 
     public static void Map(WebApplication app)
     {
-        app.MapPost("/api/client/token", async (TokenRequest req, AppDbContext db, IConfiguration cfg) =>
+        app.MapPost("/api/client/token", async (TokenRequest req, AppDbContext db, IConfiguration cfg, HttpContext http, ILoggerFactory logs) =>
         {
             if (!Guid.TryParse(req.ClientId, out var id) || string.IsNullOrEmpty(req.Secret)) return BadCredentials();
             var client = await db.BuildClients.FindAsync(id);
@@ -37,6 +38,9 @@ public static partial class BuildClientApi
                     Convert.FromHexString(client.SecretHash), Convert.FromHexString(ClientsEndpoints.HashSecret(req.Secret))))
                 return BadCredentials();
 
+            // The client sends User-Agent renkuports-client/<version>.
+            logs.CreateLogger(nameof(BuildClientApi)).LogInformation("Token for build client {Client} ({Platform}), {UserAgent}",
+                client.Name, client.Platform, http.Request.Headers.UserAgent.ToString());
             client.LastSeenAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
             var expires = DateTime.UtcNow.Add(ClientTokens.Lifetime);
@@ -51,7 +55,7 @@ public static partial class BuildClientApi
             return Results.Ok(new { AccessToken = token, ExpiresAt = expires });
         });
 
-        var g = app.MapGroup("/api/client/jobs").RequireAuthorization("BuildClient").AddEndpointFilter(async (ctx, next) =>
+        var api = app.MapGroup("/api/client").RequireAuthorization("BuildClient").AddEndpointFilter(async (ctx, next) =>
         {
             // A token outlives a deleted or disabled client, so check the client on every call (and record it as seen).
             var http = ctx.HttpContext;
@@ -63,6 +67,8 @@ public static partial class BuildClientApi
             http.Items[ClientItem] = client;
             return await next(ctx);
         });
+        var g = api.MapGroup("/jobs");
+        MapQueueViews(api, g);
 
         g.MapPost("/next", async (HttpContext http, AppDbContext db, BlobContainerClient blobs, IConfiguration cfg, INotifier notifier, UserManager<AppUser> users, ILoggerFactory logs) =>
         {
@@ -83,16 +89,17 @@ public static partial class BuildClientApi
 
             // One statement, so it is atomic: UPDLOCK keeps a second claimer from taking the row this one selected, and
             // READPAST makes that second claimer skip the locked row and take the next job instead of waiting.
+            // ClaimOrder: highest build priority of the job's port first, then oldest (the queue position uses it too).
             var lease = now.AddHours(cfg.GetValue("Jobs:LeaseHours", 72.0));
-            var claimed = await db.Database.SqlQuery<long>($"""
+            var claimed = await db.Database.SqlQuery<long>(FormattableStringFactory.Create($$"""
                 WITH next AS (
                     SELECT TOP (1) * FROM Jobs WITH (UPDLOCK, READPAST, ROWLOCK)
-                    WHERE Status = 'Queued' AND Platform = {client.Platform}
-                    ORDER BY QueuedAt, Id)
-                UPDATE next SET Status = 'InProgress', ClaimedByClientId = {client.Id}, ClaimedAt = {now},
-                    LeaseExpiresAt = {lease}, Attempts = Attempts + 1
+                    WHERE Status = 'Queued' AND Platform = {0}
+                    ORDER BY {{ClaimOrder}})
+                UPDATE next SET Status = 'InProgress', ClaimedByClientId = {1}, ClaimedAt = {2},
+                    LeaseExpiresAt = {3}, Attempts = Attempts + 1
                 OUTPUT inserted.Id AS Value;
-                """).ToListAsync();
+                """, client.Platform, client.Id, now, lease)).ToListAsync();
             if (claimed.Count == 0) return Results.NoContent();
 
             return Results.Ok(await db.Jobs.Where(j => j.Id == claimed[0]).Select(j => new
@@ -151,7 +158,7 @@ public static partial class BuildClientApi
             };
         }).WithMetadata(new RequestSizeLimitAttribute(MaxUpload + (1 << 20)));
 
-        g.MapPost("/{id:long}/complete", async (long id, HttpContext http, AppDbContext db, BlobContainerClient blobs, RepoIndexer indexer) =>
+        g.MapPost("/{id:long}/complete", async (long id, HttpContext http, AppDbContext db, BlobContainerClient blobs, RepoIndexer indexer, PriorityComputer priorities) =>
         {
             var client = (BuildClient)http.Items[ClientItem]!;
             var (job, error) = await ClaimedJob(db, id, client);
@@ -172,7 +179,7 @@ public static partial class BuildClientApi
             job.CompletedAt = DateTime.UtcNow;
             job.LeaseExpiresAt = null;
             var (res, saved) = await SaveJob(db, job);
-            if (saved) indexer.MarkDirty(job.Platform);
+            if (saved) { indexer.MarkDirty(job.Platform); priorities.MarkDirty(); }
             return res;
         });
 

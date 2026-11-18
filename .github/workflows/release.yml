@@ -1,0 +1,41 @@
+# On a vMAJOR.MINOR.PATCH tag: builds everything with that version and publishes a GitHub Release with the
+# self-contained single-file build client for each platform. macOS runner, so the osx-arm64 binary gets signed (ad hoc).
+name: Release
+on:
+  push: { tags: ['v*.*.*'] }
+permissions: { contents: write }
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 10.0.x }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+      - name: Version from the tag
+        run: |
+          v=$(scripts/version.sh)
+          # A pre-release tag (v1.2.3-rc1) or a tag version.sh does not resolve to stops the release.
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME gives version $v"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - run: tests/version-test.sh
+      - run: dotnet build RenkuOSPorts-Public.slnx -c Release -p:Version="$VERSION"
+      - run: npm ci && npm run build
+        working-directory: web
+      - name: Publish the client
+        run: |
+          mkdir dist
+          for rid in osx-arm64 linux-x64 linux-arm64 win-x64; do
+            dotnet publish src/RenkuPorts.Client -c Release -r "$rid" --self-contained -p:PublishSingleFile=true \
+              -p:Version="$VERSION" -o "out/$rid"
+            ext=; [ "$rid" = win-x64 ] && ext=.exe
+            cp "out/$rid/renkuports-client$ext" "dist/renkuports-client-$VERSION-$rid$ext"
+          done
+          test "$(out/osx-arm64/renkuports-client --version)" = "$VERSION"
+          cp client/appsettings.example.json dist/
+          (cd dist && shasum -a 256 -- * > SHA256SUMS)
+      - name: GitHub Release
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

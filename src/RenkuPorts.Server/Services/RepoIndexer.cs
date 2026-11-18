@@ -324,7 +324,8 @@ public sealed class RepoIndexer(IServiceScopeFactory scopes, BlobContainerClient
     private Task SaveStateAsync(string platform, RepoIndexState state, CancellationToken ct) =>
         Upload(IndexBlob(platform, "state.json"), BinaryData.FromObjectAsJson(state, JsonOpts), "application/json", ct);
 
-    private static async Task RenewAsync(BlobLeaseClient lease, CancellationToken ct)
+    /// <summary>Renews <paramref name="lease"/> every 20 s until <paramref name="ct"/> is cancelled.</summary>
+    internal static async Task RenewAsync(BlobLeaseClient lease, CancellationToken ct)
     {
         try
         {

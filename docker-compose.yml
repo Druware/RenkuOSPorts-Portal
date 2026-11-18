@@ -1,5 +1,5 @@
-# Local stack: SQL Server, Azurite (blob), mailpit (SMTP + UI) and the server image (API + SPA).
-# Secrets come from .env (copy .env.example).
+# Local stack: SQL Server, Azurite (blob), mailpit (SMTP + UI), the API (root Dockerfile) and nginx in front of it
+# (nginx/Dockerfile: the SPA plus a reverse proxy to the api service), as in Azure. Secrets come from .env (copy .env.example).
 services:
   sql:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -25,8 +25,9 @@ services:
     image: axllent/mailpit:latest
     ports: ["8025:8025", "1025:1025"]
 
-  web:
-    build: .
+  # Not published: everything goes through nginx (web), like the private api app in Azure.
+  api:
+    build: { context: ., args: { VERSION: "${VERSION:-0.0.0-dev}" } }   # VERSION=$(scripts/version.sh)
     depends_on:
       sql: { condition: service_healthy }
       azurite: { condition: service_started }
@@ -43,9 +44,17 @@ services:
       Auth__GitHub__ClientId: ${GITHUB_CLIENT_ID:-}
       Auth__GitHub__ClientSecret: ${GITHUB_CLIENT_SECRET:-}
       PortsTree__Path: /ports
-    ports: ["8080:8080"]
     volumes:
       - ../RenkuOSPorts:/ports:ro
+
+  # Image defaults point the proxy at http://api:8080. Read-only root: nginx writes only to /tmp.
+  web:
+    build: { context: ., dockerfile: nginx/Dockerfile }
+    depends_on:
+      api: { condition: service_started }
+    read_only: true
+    tmpfs: [/tmp]
+    ports: ["8080:8080"]
 
 volumes:
   sql:

@@ -1,0 +1,123 @@
+# Builds the server, client and web with the repo version (scripts/version.sh), plus the version-script test and a client
+# --version check. The integration tests run in their own job against SQL Server and Azurite from docker-compose.yml. The
+# container images (nginx web + Kestrel api) are built and pushed to ACR. Runs only on tags starting with v.
+name: CI
+on:
+  push: { tags: ['v*'] }
+permissions: { contents: read }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # git describe needs the history and tags
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 10.0.x }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
+      - run: tests/version-test.sh
+      - run: dotnet build RenkuOSPorts-Public.slnx -c Release -p:Version="$VERSION"
+      - name: Client reports the version
+        run: test "$(dotnet src/RenkuPorts.Client/bin/Release/net10.0/renkuports-client.dll --version)" = "$VERSION"
+      - run: npm ci && npm run build
+        working-directory: web
+
+  # The xUnit integration tests run the real server against SQL Server and Azurite from docker-compose.yml. The two
+  # tests that need Haiku's package tools and real .hpkg files report as skipped here (tests/run-haiku-tools-test.sh).
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with: { dotnet-version: 10.0.x }
+      # A fresh random SA password for this job's throwaway SQL Server. Never committed.
+      - name: Generate SA password
+        run: |
+          pw="Aa1!$(openssl rand -hex 16)"
+          echo "::add-mask::$pw"
+          { echo "SA_PASSWORD=$pw"; echo "RENKUPORTS_TEST_SA_PASSWORD=$pw"; } >> "$GITHUB_ENV"
+      - run: docker compose up -d --wait sql azurite
+      - run: dotnet test RenkuOSPorts-Public.slnx -c Release
+      - name: Compose logs
+        if: failure()
+        run: docker compose logs --no-color sql azurite
+
+  # Builds both images for App Service (linux/amd64) with the repo version as the api's VERSION build argument. The api
+  # image's haiku-tools stage (jam plus Haiku's package tools from source) takes a long time, so every stage is cached in
+  # the GitHub Actions cache (mode=max keeps the intermediate stages too) and only rebuilt when its inputs change.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0, persist-credentials: false }   # git describe needs the history and tags
+      - run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build web image (nginx + SPA)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: nginx/Dockerfile
+          platforms: linux/amd64
+          tags: renkuos-ports/web:ci
+          load: true
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+      - name: Validate nginx config inside the image
+        # The upstream host `api` only exists on the compose network; map it for the syntax check.
+        run: docker run --rm --add-host api:127.0.0.1 renkuos-ports/web:ci nginx -t
+      - name: Build API image (Kestrel + Haiku tools)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: VERSION=${{ env.VERSION }}
+          tags: renkuos-ports/api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+  # Pushes the images for this commit to ACR, tagged with the commit SHA and `latest`. Logs in with an ACR
+  # repository-scoped token that can push to the two image repositories only (secrets ACR_LOGIN_SERVER / ACR_USERNAME /
+  # ACR_SECRET). The build is the same as in the docker job, so it comes from the GitHub Actions cache.
+  push-images:
+    needs: [build, integration-tests, docker]
+    runs-on: ubuntu-latest
+    env:
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0, persist-credentials: false }
+      - run: echo "VERSION=$(scripts/version.sh)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to the registry
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_SECRET: ${{ secrets.ACR_SECRET }}
+        run: echo "$ACR_SECRET" | docker login "$ACR_LOGIN_SERVER" --username "$ACR_USERNAME" --password-stdin
+      - name: Build and push web image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: nginx/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/renkuos-ports/web:${{ env.COMMIT_SHA }}
+            ${{ env.ACR_LOGIN_SERVER }}/renkuos-ports/web:latest
+          cache-from: type=gha,scope=web
+      - name: Build and push API image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: VERSION=${{ env.VERSION }}
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/renkuos-ports/api:${{ env.COMMIT_SHA }}
+            ${{ env.ACR_LOGIN_SERVER }}/renkuos-ports/api:latest
+          cache-from: type=gha,scope=api
+      - name: Log out of the registry
+        if: always()
+        run: docker logout "$ACR_LOGIN_SERVER"

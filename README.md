@@ -6,7 +6,8 @@ A public package repository and remote build coordinator for RenkuOSPorts, model
 
 | Component | Tech | Local stand-in | Azure service |
 |---|---|---|---|
-| Web UI and API (`src/RenkuPorts.Server`, SPA from `web/`) | ASP.NET Core 10, Identity, Vue 3 | `web` container on port 8080 | App Service (Web App for Containers) |
+| Web UI (`web/`, `nginx/`) | Vue 3 SPA served by nginx, which reverse-proxies the API | `web` container on port 8080 | App Service (Web App for Containers) |
+| API (`src/RenkuPorts.Server`) | ASP.NET Core 10 on Kestrel, Identity | `api` container (port 8080, reached only through `web`) | App Service (Web App for Containers) |
 | Database | EF Core, SQL Server | `sql` container (SQL Server 2022, host port 14333) | Azure SQL Database |
 | Package and log storage | Azure.Storage.Blobs, container `packages` | `azurite` container (blob, host port 10000) | Storage account |
 | Notification email | SMTP or Azure Communication Services | `mailpit` (SMTP 1025, UI 8025) | Azure Communication Services Email |
@@ -19,11 +20,13 @@ Requirements: Docker, the .NET 10 SDK, Node 22 (only for web development). The c
     cp .env.example .env
     docker compose up -d --build
 
+Two images are built: `api` (root `Dockerfile`: the server on Kestrel, port 8080, non-root, with the Haiku tools) and `web` (`nginx/Dockerfile`: the SPA built into a non-root, read-only nginx on port 8080). Only `web` is published; it serves the SPA and proxies `/api/`, `/signin-github` and the `/repo/<platform>/` download and index paths to the `api` service. The upstream is set by `API_UPSTREAM_HOST`, `API_UPSTREAM_PORT` and `API_UPSTREAM_SCHEME` (defaults `api`, `8080`, `http`; in Azure the api app's `*.azurewebsites.net` host, `443`, `https`).
+
 The SQL Server image is amd64 only and runs under Rosetta on Apple silicon, so the first start takes a while. The server applies EF migrations, creates the blob container and seeds the roles and admin account at startup.
 
 | What | URL |
 |---|---|
-| Web UI and API | http://localhost:8080 |
+| Web UI and API (through nginx) | http://localhost:8080 |
 | Mailpit (captured emails) | http://localhost:8025 |
 | SQL Server | `localhost,14333`, user `sa`, password `SA_PASSWORD` from `.env` |
 | Azurite blob endpoint | http://localhost:10000 |
@@ -71,7 +74,7 @@ Two scripts ship in `client/scripts/`:
 
 ## Job lifecycle
 
-A job is created `Queued`. A client's `POST /api/client/jobs/next` atomically claims the oldest Queued job for its platform: the job becomes `InProgress`, records the client, claim time and lease expiry (now plus `Jobs:LeaseHours`, default 72), and increments `attempts`. The client uploads each package and then calls complete, which requires at least one uploaded package and sets `Succeeded`; the packages appear in the public repository immediately. If the build or upload fails the client calls fail: the job becomes `Failed`, the claim is cleared, the summary and log are kept, and every user in the `Admin` role gets an email. An admin can requeue a Failed or Cancelled job, or cancel a Queued one. At each `next` call, InProgress jobs whose lease has expired are returned to Queued and the admins are emailed; a late complete or fail from the old client then gets 409 (job no longer InProgress) or 403 (reclaimed by another client). Uploading a package whose platform and file name already exist is a no-op if the SHA-256 matches and a 409 if it differs. Logs are stored in blob storage as `logs/<jobId>.log`, packages as `<platform>/<sha256>/<fileName>`, and the ASP.NET Data Protection keys as `dataprotection/keys.xml` in the same container.
+A job is created `Queued`. A client's `POST /api/client/jobs/next` atomically claims the Queued job for its platform whose port has the highest build priority (see below), oldest first among equals: the job becomes `InProgress`, records the client, claim time and lease expiry (now plus `Jobs:LeaseHours`, default 72), and increments `attempts`. The client uploads each package and then calls complete, which requires at least one uploaded package and sets `Succeeded`; the packages appear in the public repository immediately. If the build or upload fails the client calls fail: the job becomes `Failed`, the claim is cleared, the summary and log are kept, and every user in the `Admin` role gets an email. An admin can requeue a Failed or Cancelled job, or cancel a Queued one. At each `next` call, InProgress jobs whose lease has expired are returned to Queued and the admins are emailed; a late complete or fail from the old client then gets 409 (job no longer InProgress) or 403 (reclaimed by another client). Uploading a package whose platform and file name already exist is a no-op if the SHA-256 matches and a 409 if it differs. Logs are stored in blob storage as `logs/<jobId>.log`, packages as `<platform>/<sha256>/<fileName>`, and the ASP.NET Data Protection keys as `dataprotection/keys.xml` in the same container.
 
 The package listing (`GET /api/repo/<platform>/packages?search=&page=&pageSize=`) is paged, newest first, and returns `{ items, total, page, pageSize }`; `pageSize` defaults to 50 and is capped at 200. The admin job (`GET /api/jobs`) and recipe (`GET /api/recipes`) lists are paged the same way. The repository page keeps the search and page in its URL (`?q=&page=`).
 
@@ -83,6 +86,35 @@ The admin page's Recipes tab has an Automatic updates window (API: `GET`/`PUT /a
 - Maps changed files to ports: a changed `<category>/<dir>/<port>-<version>.recipe` gives its port; a file under that directory's `patches/` or `additional-files/` gives every port with a recipe there.
 - For each changed port and platform, queues the port's newest version (through the same code as `POST /api/jobs`, so a platform with a Queued or InProgress job for it is skipped) only if the platform already publishes a package of that port and no published file starts with `<port>-<version>-<REVISION>-`. Other cases are skipped with the reason ("not built on <platform> yet", "already published; bump REVISION to rebuild").
 - The processed commit moves on when the run finishes, skips included; a git or database error keeps the old commit and is shown. One atomic update of the settings row claims a run, so only one server instance runs it (a claim older than an hour is taken over). Jobs it queues show "auto-update" as queued by.
+
+## Build priority
+
+A port many outstanding ports depend on is built first. The admin page's Recipes tab has a Build priority window (API, Admin only: `GET /api/priorities`, `POST /api/priorities/recompute`, `POST /api/priorities/<platform>/queue-top` with `{ count }`, 1 to 200, default 20), and the recipe list takes `platform` and `sort=priority` (`GET /api/recipes?platform=arm64&sort=priority`) and then shows each recipe's priority and direct dependents there.
+
+- Every recipe is evaluated for each platform the way HaikuPorter does it: bash sources the recipe with `portName`, `portVersion`, `targetArchitecture`, `secondaryArchSuffix` and the other port variables set, then prints its `ARCHITECTURES`, `PROVIDES*`, `REQUIRES*`, `BUILD_REQUIRES`, `BUILD_PREREQUIRES` and `PACKAGE_NAME*` (`Services/RecipeEvaluator.cs`, the bash script of RenkuOSPorts' `renkuos/bootstrap/arm64/phase2/eval-recipes.py` driven from C#, so the image needs bash but not Python). Evaluations run in parallel and are cached per recipe file SHA-256 in blob `priorities/<platform>/eval.json`, so later runs only evaluate changed recipes.
+- The graph follows `resolve.py` there: a port's recipe is its newest stable one on the platform, else newest untested, else newest. A port is outstanding on a platform if that recipe is stable there and no package of the port is published there. Port X needs port Y if a `BUILD_REQUIRES` or `BUILD_PREREQUIRES` entry of X, or a runtime `REQUIRES` of a package those pull in (transitively), resolves to a package of Y; names only Haiku itself provides, and names no recipe provides, are ignored. A port's priority is the number of outstanding ports that need it directly or through other outstanding ports (a published intermediate already satisfies its dependents); each is counted once, so cycles end. Dependents is the number of outstanding ports that need it directly.
+- Results are stored per platform and port (`PortPriorities`), with the direct needs edges of the outstanding ports (`PortDependencies`, replaced in the same transaction; about 137k edges for arm64 with nothing published). The job claim orders by the job's port priority (no row counts as 0), then queue time. Queue top N queues, through the same code as `POST /api/jobs`, the highest-priority outstanding ports that have nothing published, queued or building on the platform, using the recipe the graph chose.
+- Priorities are recomputed at startup, right after a recipe sync (also the automatic update's), 5 minutes after the last package was published or deleted, and on Recompute. A lease on blob `priorities/lock` lets one instance compute at a time. A full first evaluation of the ~4000 recipes takes about 5 s per platform in the Linux image on 10 cores (about 90 s on macOS, where .NET starts processes much more slowly); a run with no changed recipes reads and hashes the files in well under a second, and the graph takes about 0.3 s.
+
+## Queue view for build clients
+
+A build client can see the queue with its own bearer token (the SPA cookie does not work here, and the token does not open the admin API). Both endpoints are read-only and show client names and owner display names only, never emails, user ids, secrets or logs.
+
+- `GET /api/client/jobs?status=&platform=&scope=&page=&pageSize=` returns a page (`items`, `total`, `page`, `pageSize`; 50 per page by default, 1 to 200) of jobs on every platform, by default Queued and InProgress, in claim order (finished statuses newest first). `scope=mine` keeps the jobs claimed by this client, `scope=owner` those claimed by any client of the same owner. Each job has its port's `priority`, `claimedBy` (client name), `mine`, `sameOwner` (claimed by another client of the owner), `queuePosition` (Queued jobs on the caller's platform: the 1-based place in the order the claim takes; both use one SQL ORDER BY, `BuildClientApi.ClaimOrder`) and the dependency tree from `PortDependencies`: `waitingOn` (up to 10 ports, nearest first, that the job's port needs directly or transitively and that are queued or building on its platform) with `waitingOnCount`, `inMyChain` (it needs, or is needed by, what this client is building), `inOwnerChain` (the same for the owner's other clients) and, on this client's own current job, `unblocks` (queued jobs that need it). Edges exist only from outstanding ports, so a rebuild of a published port waits on nothing; a lease that has expired shows InProgress until the next claim requeues it.
+- `GET /api/client/me` returns `id`, `name`, `platform`, `owner`, `currentJob` (as above, or null) and `ownerClients` (`name`, `platform`, `lastSeenAt`, `currentJobId`).
+
+The client prints them with the same configuration as the build loop (`BuildCommand` is not needed) and exits; with no command it runs the build loop as before:
+
+    renkuports-client jobs [--mine|--owner] [--status Queued] [--platform arm64] [--page 2]
+    renkuports-client status
+
+`jobs` marks jobs held by this client with `*` and by another client of the owner with `o`, shows `#position` or the claiming client, the chain (`mine`, `owner`, `unblocks N`) and what each job is waiting on:
+
+       ID  PORT-VERSION     PLATFORM  STATUS      POS/CLAIMED-BY  CHAIN              WAITING ON
+    *  1   zlib-1.3.2       arm64     InProgress  m1-builder      owner, unblocks 1
+    o  2   foo-1.10         arm64     InProgress  m2-builder      mine               zlib
+       3   openexr30-3.0.5  arm64     Queued      #1              mine+owner         foo, zlib
+       4   bar-2.0          arm64     Queued      #2
 
 ## Package repository index (pkgman)
 
@@ -122,7 +154,37 @@ Two tests run the real `package` and `package_repo` tools on real hpkgs: index c
 
 ## Configuration notes
 
-Besides the keys in `appsettings.json`: `Database:MigrateOnStartup` (default true; set false to apply migrations from a pipeline, e.g. `dotnet ef migrations script --idempotent -p src/RenkuPorts.Server -o migrate.sql`), `Blob:ServiceUri` and `Email:AzureCommunication:Endpoint` (use `DefaultAzureCredential` instead of the connection strings, which remain the fallback), `PortsTree:GitUrl` and `PortsTree:Branch`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` (when set, telemetry goes to Application Insights through OpenTelemetry). SQL access uses EF's retry-on-failure; a transient error after the job-claim statement has committed can make the retry claim a second job, and that extra job simply waits out its lease. Behind a TLS-terminating proxy set `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true`.
+Besides the keys in `appsettings.json`: `Database:MigrateOnStartup` (default true; set false to apply migrations from a pipeline, e.g. `dotnet ef migrations script --idempotent -p src/RenkuPorts.Server -o migrate.sql`), `Blob:ServiceUri` and `Email:AzureCommunication:Endpoint` (use `DefaultAzureCredential` instead of the connection strings, which remain the fallback), `PortsTree:GitUrl` and `PortsTree:Branch`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` (when set, telemetry goes to Application Insights through OpenTelemetry). SQL access uses EF's retry-on-failure; a transient error after the job-claim statement has committed can make the retry claim a second job, and that extra job simply waits out its lease. The server applies `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` from any hop (`UseForwardedHeaders` in `Program.cs`), so the API must be reachable only through nginx; `ASPNETCORE_FORWARDEDHEADERS_ENABLED` is no longer needed.
+
+## CI
+
+`.github/workflows/ci.yml` runs only when a tag starting with `v` is pushed. It builds and tests the server (against SQL Server and Azurite from the compose file), builds the SPA, builds both images for `linux/amd64` and checks the nginx config with `nginx -t`. The slow `haiku-tools` stage is cached in the GitHub Actions cache. It then pushes `<ACR_LOGIN_SERVER>/renkuos-ports/web` and `<ACR_LOGIN_SERVER>/renkuos-ports/api`, each tagged with the commit SHA and `latest`. It needs the repository secrets `ACR_LOGIN_SERVER` (for example `myregistry.azurecr.io`), `ACR_USERNAME` and `ACR_SECRET` (an ACR token with push rights to those two repositories).
+
+## Versioning and releases
+
+The repository has one version for the server, the client and the web UI, taken from the newest `vMAJOR.MINOR.PATCH` git tag by `scripts/version.sh`, the only place the mapping lives:
+
+| Checkout | Version |
+|---|---|
+| On tag `v1.2.3`, clean tree | `1.2.3` |
+| 5 commits after `v1.2.3` | `1.2.4-dev.5+gabc1234` (the next patch as a pre-release, so it sorts after `1.2.3`) |
+| Uncommitted changes | `1.2.4-dev.0+gabc1234.dirty` |
+| No version tag yet | `0.0.0-dev.<commits>+gabc1234` |
+| Not a git checkout, or nothing passed | `0.0.0-dev` (the default in `Directory.Build.props`) |
+
+Pre-release tags such as `v1.3.0-rc1` are ignored. Builds pass the version explicitly with `-p:Version=...`; the Docker build context has no git history, so the image gets it as the `VERSION` build argument:
+
+    VERSION=$(scripts/version.sh) docker compose up -d --build
+    dotnet publish src/RenkuPorts.Client -c Release -p:Version=$(scripts/version.sh) ...
+
+To cut a release:
+
+    git tag -a v0.1.0 -m "RenkuOS Ports 0.1.0"
+    git push origin v0.1.0
+
+`.github/workflows/release.yml` then checks that the tag and `scripts/version.sh` agree, builds the server, client and web with that version, and creates the GitHub Release for the tag with the self-contained single-file build client for `osx-arm64`, `linux-x64`, `linux-arm64` and `win-x64` (`renkuports-client-<version>-<rid>`, `chmod +x` after download), `appsettings.example.json` and `SHA256SUMS`. Container images are not published by it.
+
+Where to see the version: the site footer (`v1.2.3`, from the API, so it is always the deployed server's), `GET /api/version` (`{"version":"1.2.4-dev.5","commit":"abc1234"}`; `commit` is null for a tagged release), the server's first log line, and `renkuports-client --version`. The client also logs it at start and sends `User-Agent: renkuports-client/<version>`, which the server logs when the client gets a token. `tests/version-test.sh` checks the mapping against a throwaway git repository.
 
 ## Known gaps
 

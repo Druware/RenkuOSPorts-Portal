@@ -12,6 +12,7 @@ using RenkuPorts.Server.Services;
 namespace RenkuPorts.Server.Tests;
 
 /// <summary>Integration tests over HTTP. They share one database, so each starts from an empty job queue.</summary>
+[Collection("Database")]
 public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyncLifetime
 {
     public Task InitializeAsync() => app.ResetQueueAsync();
@@ -399,6 +400,19 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
         Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync("/repo/sparc/packages/x.hpkg")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await anon.GetAsync("/api/nope")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await anon.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task GitHub_redirect_uri_uses_the_forwarded_scheme_and_host()
+    {
+        using var github = app.WithWebHostBuilder(b => b.UseSetting("Auth:GitHub:ClientId", "test-client").UseSetting("Auth:GitHub:ClientSecret", "test-secret"));
+        var anon = github.CreateClient(new() { AllowAutoRedirect = false });
+        var req = new HttpRequestMessage(HttpMethod.Get, "/api/auth/external/GitHub");
+        req.Headers.Add("X-Forwarded-Proto", "https");
+        req.Headers.Add("X-Forwarded-Host", "ports.example.org");
+        var res = await anon.SendAsync(req);
+        Assert.Equal(HttpStatusCode.Redirect, res.StatusCode);
+        Assert.Contains("redirect_uri=" + Uri.EscapeDataString("https://ports.example.org/signin-github"), res.Headers.Location!.Query);
     }
 
     [Theory]

@@ -145,3 +145,34 @@ public class AutoUpdateSettings
     /// <summary>JSON of <see cref="Services.AutoUpdateResult"/>.</summary>
     public string? LastResultJson { get; set; }
 }
+
+/// <summary>
+/// The build priority of a port on a platform, computed by <see cref="Services.PriorityComputer"/>; the job claim orders by
+/// <see cref="Priority"/>. One row per (platform, port) with a recipe.
+/// </summary>
+public class PortPriority
+{
+    public string Platform { get; set; } = "";
+    public string PortName { get; set; } = "";
+    /// <summary>The recipe a build uses on this platform: the newest stable one, else the newest untested, else the newest.</summary>
+    public int RecipeId { get; set; }
+    public Recipe? Recipe { get; set; }
+    /// <summary>The recipe is stable on the platform and no package of the port was published there when this was computed.</summary>
+    public bool Outstanding { get; set; }
+    /// <summary>Outstanding ports that need this port built first, directly or through other outstanding ports.</summary>
+    public int Priority { get; set; }
+    /// <summary>Outstanding ports that need this port directly.</summary>
+    public int Dependents { get; set; }
+    public DateTime ComputedAt { get; set; }
+}
+
+/// <summary>
+/// A direct build dependency on a platform, written with <see cref="PortPriority"/>: outstanding port <see cref="PortName"/> needs
+/// <see cref="DependsOn"/> built first (see <see cref="Services.PriorityGraph.Compute"/>). Only outstanding ports have rows.
+/// </summary>
+public class PortDependency
+{
+    public string Platform { get; set; } = "";
+    public string PortName { get; set; } = "";
+    public string DependsOn { get; set; } = "";
+}

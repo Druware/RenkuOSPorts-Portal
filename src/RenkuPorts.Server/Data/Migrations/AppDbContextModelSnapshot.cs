@@ -521,6 +521,59 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.ToTable("Packages");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.PortDependency", b =>
+                {
+                    b.Property<string>("Platform")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("PortName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("DependsOn")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.HasKey("Platform", "PortName", "DependsOn");
+
+                    b.ToTable("PortDependencies");
+                });
+
+            modelBuilder.Entity("RenkuPorts.Server.Data.PortPriority", b =>
+                {
+                    b.Property<string>("Platform")
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("PortName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime>("ComputedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Dependents")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("Outstanding")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<int>("RecipeId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Platform", "PortName");
+
+                    b.HasIndex("RecipeId");
+
+                    b.HasIndex("Platform", "Priority");
+
+                    b.ToTable("PortPriorities");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Recipe", b =>
                 {
                     b.Property<int>("Id")
@@ -715,6 +768,17 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.Navigation("Import");
 
                     b.Navigation("Job");
+                });
+
+            modelBuilder.Entity("RenkuPorts.Server.Data.PortPriority", b =>
+                {
+                    b.HasOne("RenkuPorts.Server.Data.Recipe", "Recipe")
+                        .WithMany()
+                        .HasForeignKey("RecipeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Recipe");
                 });
 
             modelBuilder.Entity("RenkuPorts.Server.Data.Job", b =>

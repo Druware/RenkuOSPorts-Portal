@@ -5,6 +5,7 @@ using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
@@ -65,6 +66,8 @@ builder.Services.AddSingleton<INotifier>(sp => cfg["Email:Mode"] == "AzureCommun
 // Room for a 5 MB build log sent as a form field to /complete. Package uploads do not use form binding.
 builder.Services.AddSingleton<RepoIndexer>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RepoIndexer>());
+builder.Services.AddSingleton<PriorityComputer>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PriorityComputer>());
 builder.Services.AddSingleton<RepoImporter>();
 builder.Services.AddSingleton<AutoUpdater>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AutoUpdater>());
@@ -72,11 +75,25 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<AutoUpdater>());
 builder.Services.Configure<FormOptions>(o => o.ValueLengthLimit = 16 << 20);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddProblemDetails();
+// Behind nginx (and, in Azure, App Service's front end): the public scheme and host, for the GitHub OAuth redirect URI and
+// cookies. nginx overwrites these headers, so the left-most value is always its own; every hop is trusted (no limit, no known
+// proxies) because nginx is the API's only caller (the compose network, or localhost in the App Service sidecar layout).
+// SECURITY: never expose the API's port directly (main container, WEBSITES_PORT, published port); anyone could then spoof
+// the scheme, host (OAuth redirect) and client IP.
+builder.Services.Configure<ForwardedHeadersOptions>(o =>
+{
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
+    o.ForwardLimit = null;
+    o.KnownIPNetworks.Clear();
+    o.KnownProxies.Clear();
+});
 
 var app = builder.Build();
+app.Logger.LogInformation("RenkuPorts.Server {Version}", VersionEndpoints.Informational);
 
 await Startup.InitializeAsync(app.Services);
 
+app.UseForwardedHeaders();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseDefaultFiles();
@@ -90,6 +107,7 @@ ClientsEndpoints.Map(app);
 AdminEndpoints.Map(app);
 BuildClientApi.Map(app);
 ImportEndpoints.Map(app);
+VersionEndpoints.Map(app);
 
 app.MapFallback("/api/{**rest}", () => Results.NotFound());
 // /repo/{platform} is an SPA route; only the package download path under /repo is the server's.

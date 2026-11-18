@@ -39,7 +39,7 @@ public record RepoListing(string? Architecture, string? Vendor, List<SourcePacka
 /// Copies the packages a source pkgman repository has and this platform lacks (by file name). Runs in the background on the
 /// instance that started it; progress, and the cancel request from any instance, go through the <see cref="Import"/> row.
 /// </summary>
-public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClient blobs, RepoIndexer indexer, IHostApplicationLifetime life, ILogger<RepoImporter> log)
+public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClient blobs, RepoIndexer indexer, PriorityComputer priorities, IHostApplicationLifetime life, ILogger<RepoImporter> log)
 {
     /// <summary>A Running import whose row was not updated for this long was interrupted (its instance stopped).</summary>
     public static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
@@ -128,7 +128,7 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
             imp.FinishedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
             Directory.Delete(work, true);
-            if (imported > 0) indexer.MarkDirty(imp.Platform);
+            if (imported > 0) { indexer.MarkDirty(imp.Platform); priorities.MarkDirty(); }
         }
     }
 

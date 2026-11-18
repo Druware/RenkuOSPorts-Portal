@@ -16,6 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Unmodified recipes from HaikuPorts / RenkuOSPorts (MIT), for the recipe evaluation test. -->
+    <None Include="RealRecipes/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
 

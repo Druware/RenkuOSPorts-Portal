@@ -1,0 +1,8 @@
+<Project>
+  <!-- One version for the whole repo. Builds pass the real one: -p:Version=$(scripts/version.sh). -->
+  <PropertyGroup>
+    <Version>0.0.0-dev</Version>
+    <!-- Keep AssemblyInformationalVersion exactly $(Version); the SDK would otherwise append +<full git sha>. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

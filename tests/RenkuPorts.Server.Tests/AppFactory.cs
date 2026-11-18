@@ -68,6 +68,7 @@ public class AppFactory : WebApplicationFactory<Program>
         b.UseSetting("Seed:AdminPassword", AdminPassword);
         b.UseSetting("PortsTree:Path", PortsTree);
         b.UseSetting("AutoUpdate:Schedule", "false");
+        b.UseSetting("Priorities:Schedule", "false");
         b.UseWebRoot(_webRoot);
         b.ConfigureServices(s =>
         {
@@ -124,6 +125,8 @@ public class AppFactory : WebApplicationFactory<Program>
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Packages.ExecuteDeleteAsync();
         await db.Jobs.ExecuteDeleteAsync();
+        await db.PortPriorities.ExecuteDeleteAsync();
+        await db.PortDependencies.ExecuteDeleteAsync();
         if (!await db.Recipes.AnyAsync()) await RecipeScanner.SyncAsync(db, PortsTree, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
     }
 

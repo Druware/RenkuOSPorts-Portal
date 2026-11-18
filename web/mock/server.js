@@ -55,6 +55,7 @@ http.createServer(async (req, res) => {
   let r
   console.log(req.method, req.url)
 
+  if (p === '/api/version') return send(res, 200, { version: '0.0.0-mock', commit: null })
   if (p === '/api/platforms') return send(res, 200, PLATFORMS.map((pl) => {
     const ps = packages.filter((x) => x.platform === pl)
     return { platform: pl, packageCount: ps.length, totalBytes: ps.reduce((a, x) => a + x.size, 0), lastUploadAt: ps[0]?.uploadedAt ?? null }
@@ -128,8 +129,13 @@ http.createServer(async (req, res) => {
   }
   if (p === '/api/recipes') {
     const s = (url.searchParams.get('search') || '').toLowerCase()
-    return send(res, 200, paged(url, recipes.filter((x) => x.portName.includes(s))))
+    const rows = recipes.filter((x) => x.portName.includes(s)).map((x) => ({ ...x, priority: (x.id * 7) % 16, dependents: (x.id * 3) % 5, outstanding: x.id % 3 !== 0 }))
+    if (url.searchParams.get('sort') === 'priority') rows.sort((a, b) => b.priority - a.priority)
+    return send(res, 200, paged(url, rows))
   }
+  if (p === '/api/priorities') return send(res, 200, { running: false, lastError: null, platforms: PLATFORMS.map((pl) => ({ platform: pl, computedAt: ago(30), outstanding: 12 })) })
+  if (p === '/api/priorities/recompute' && req.method === 'POST') return send(res, 202, null)
+  if (/^\/api\/priorities\/[^/]+\/queue-top$/.test(p) && req.method === 'POST') return send(res, 200, [])
   if (p === '/api/jobs' && req.method === 'GET') {
     const st = url.searchParams.get('status'), pl = url.searchParams.get('platform')
     return send(res, 200, paged(url, jobs.filter((j) => (!st || j.status === st) && (!pl || j.platform === pl)).sort((a, b) => b.id - a.id)))

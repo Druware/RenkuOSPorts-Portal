@@ -1,0 +1,41 @@
+# Shared settings for every location proxied to the API.
+# TEMPLATE: rendered to /tmp/snippets/proxy-api.conf at container start (see default.conf.template).
+proxy_pass ${API_UPSTREAM_SCHEME}://api_upstream;
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+# App Service routes by Host (and SNI) and rejects a Host it does not own, so the upstream sees
+# its own hostname. The public host the client used is passed on separately: the API builds the
+# GitHub OAuth redirect URI from it (UseForwardedHeaders in Program.cs).
+proxy_set_header Host ${API_UPSTREAM_HOST};
+proxy_set_header X-Forwarded-Host $host;
+# Overwrite (not append): nginx is the only hop that writes these, so the left-most value the API
+# sees is always nginx's, even when the api app's own front end appends after it in Azure.
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $forwarded_proto;
+
+# TLS to the upstream (API_UPSTREAM_SCHEME=https, i.e. Azure). These directives only take effect
+# for an https proxy_pass; with http (compose) nginx ignores them and loads no certificates.
+# Send SNI, and use the real hostname for SNI and certificate name verification (without
+# proxy_ssl_name both would be "api_upstream").
+proxy_ssl_server_name on;
+proxy_ssl_name ${API_UPSTREAM_HOST};
+proxy_ssl_verify on;
+proxy_ssl_verify_depth 4;
+proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+proxy_ssl_protocols TLSv1.2 TLSv1.3;
+proxy_ssl_session_reuse on;
+
+# Responses (.hpkg downloads up to 4 GiB, repo indexes, logs) are buffered in memory only, never
+# spilled to a temp file on disk: when the in-memory buffers are full, nginx stops reading from the
+# API until the client has taken more (large downloads still work, at the client's pace).
+proxy_max_temp_file_size 0;
+
+# 230s matches the App Service front end's own idle limit, so slow admin calls (recipe sync,
+# auto-update run) fail there rather than here first.
+proxy_connect_timeout 5s;
+proxy_send_timeout 60s;
+proxy_read_timeout 230s;
+
+proxy_hide_header X-Powered-By;
+
+include /etc/nginx/snippets/security-headers.conf;

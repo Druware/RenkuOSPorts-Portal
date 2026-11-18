@@ -1,0 +1,111 @@
+# TEMPLATE: rendered at container start by the stock entrypoint (20-envsubst-on-templates.sh)
+# into /tmp/conf.d/default.conf. Only ${API_UPSTREAM_*} is substituted (NGINX_ENVSUBST_FILTER);
+# nginx's own variables ($host, $uri, ...) pass through untouched. The values are validated by
+# /docker-entrypoint.d/05-validate-api-upstream.sh before rendering.
+#
+# The API. docker-compose: the `api` service over plain HTTP (image defaults api / 8080 / http).
+# Azure: the api app's *.azurewebsites.net hostname on 443 over HTTPS (app settings
+# API_UPSTREAM_HOST / _PORT / _SCHEME).
+#
+# DNS: a static upstream is resolved ONCE, when nginx starts (and on reload). nginx exits at
+# startup if the name does not resolve, and never re-resolves while running. That is deliberate:
+# no `resolver` directive, so no runtime DNS dependency or spoofable runtime lookups. If the api's
+# address changes, restart the web app.
+upstream api_upstream {
+    server ${API_UPSTREAM_HOST}:${API_UPSTREAM_PORT};
+    keepalive 16;
+}
+
+server {
+    listen 8080 default_server;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    include /etc/nginx/snippets/security-headers.conf;
+
+    # ---- Empty path segments are refused ----
+    # Locations match the normalized path ("//" merged), but proxy_pass forwards the raw request
+    # URI, so the path the API routes on could differ from the one the allow-list below checked.
+    if ($request_uri ~ "^[^?]*//") {
+        return 400;
+    }
+
+    # ---- Proxy allow-list: exactly these paths reach the API; nothing else does ----
+    # (The same set as web/vite.config.js's dev proxy plus the pkgman index files and the OAuth
+    # callback; Program.cs's MapFallback lines give the server-owned path prefixes.)
+
+    location /api/ {
+        limit_req zone=api burst=40 nodelay;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    # Credentials in the body: a sign-in-strength limit (password sign-in, build client secret).
+    location = /api/auth/login {
+        limit_req zone=auth_login burst=5 nodelay;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    location = /api/client/token {
+        limit_req zone=auth_login burst=5 nodelay;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    # Build client calls: complete and fail carry the job log (the client sends its last 5 MB, as a
+    # form field or JSON; FormOptions.ValueLengthLimit is 16 MiB), so 17m instead of the 1m default.
+    location /api/client/ {
+        limit_req zone=api burst=40 nodelay;
+        client_max_body_size 17m;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    # Package upload (POST /api/client/jobs/<id>/packages): up to BuildClientApi.MaxUpload (4 GiB)
+    # plus its 1 MiB multipart allowance, i.e. 4097m. The body is streamed to the API, which streams
+    # it to blob storage, never buffered to a temp file here (a regex, so it wins over the prefix above).
+    location ~ ^/api/client/jobs/[0-9]+/packages$ {
+        limit_req zone=api burst=40 nodelay;
+        client_max_body_size 4097m;
+        proxy_request_buffering off;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    # GitHub sign-in callback (the handler's default CallbackPath; the SPA's own page is /signin).
+    location = /signin-github {
+        limit_req zone=api burst=40 nodelay;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    # pkgman repository: package downloads and the index files. /repo/<platform> itself is an SPA
+    # route, so only these paths under it go to the API.
+    location ~ ^/repo/[^/]+/(packages/|repo$|repo\.info$|repo\.sha256$) {
+        limit_req zone=api burst=40 nodelay;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    # Dotfiles (.git, .env, ...) are never served.
+    location ~ /\. {
+        return 404;
+    }
+
+    # ---- SPA ----
+
+    # Vite emits content-hashed filenames under /assets/, so they can be cached forever.
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # The SPA shell must always be revalidated so a new deployment is picked up immediately.
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
+    # History-mode fallback: unknown paths get the SPA shell (via the location above). No
+    # `$uri/` here, which would issue directory redirects instead of serving the shell.
+    location / {
+        try_files $uri /index.html;
+    }
+}

@@ -11,6 +11,7 @@ namespace RenkuPorts.Server.Endpoints;
 public static class AdminEndpoints
 {
     public record QueueRequest(string PortName, string? Version, string[] Platforms);
+    public record QueueTopRequest(int? Count);
     public record AutoUpdateRequest(bool Enabled, int IntervalHours, string[]? Platforms);
     public record AutoUpdateDto(bool Enabled, int IntervalHours, string[] Platforms, bool Running, DateTime? LastRunAt, string? LastCommit, AutoUpdateResult? LastResult);
 
@@ -25,7 +26,7 @@ public static class AdminEndpoints
     {
         var g = app.MapGroup("/api").RequireAuthorization("Admin");
 
-        g.MapPost("/recipes/sync", async (AppDbContext db, IConfiguration cfg, ILoggerFactory logs) =>
+        g.MapPost("/recipes/sync", async (AppDbContext db, IConfiguration cfg, ILoggerFactory logs, PriorityComputer priorities) =>
         {
             if (!SyncLock.Wait(0)) return Results.Problem(statusCode: 409, title: "A recipe sync is already running");
             try
@@ -37,7 +38,9 @@ public static class AdminEndpoints
                     await RecipeScanner.UpdateCheckoutAsync(root, url, cfg["PortsTree:Branch"] ?? "main");
                 else if (!Directory.Exists(root))
                     return Results.Problem(statusCode: 500, title: "Ports tree not found", detail: $"PortsTree:Path '{root}' does not exist on the server.");
-                return Results.Ok(await RecipeScanner.SyncAsync(db, root, logs.CreateLogger("RecipeScanner")));
+                var synced = await RecipeScanner.SyncAsync(db, root, logs.CreateLogger("RecipeScanner"));
+                priorities.RequestNow();
+                return Results.Ok(synced);
             }
             finally
             {
@@ -45,12 +48,57 @@ public static class AdminEndpoints
             }
         });
 
-        g.MapGet("/recipes", async (string? search, int? page, int? pageSize, AppDbContext db) =>
+        // With a platform each recipe carries its port's priority there; sort=priority (needs a platform) puts the highest first.
+        g.MapGet("/recipes", async (string? search, string? platform, string? sort, int? page, int? pageSize, AppDbContext db) =>
         {
-            var q = db.Recipes.AsQueryable();
-            if (!string.IsNullOrWhiteSpace(search)) q = q.Where(r => r.PortName.Contains(search));
-            return await Paged<RecipeDto>.FromAsync(q, o => o.OrderBy(r => r.PortName).ThenByDescending(r => r.Version).ThenBy(r => r.Id),
-                r => new RecipeDto(r.Id, r.PortName, r.Category, r.Version, r.RecipePath, r.RecipeUpdatedAt), page, pageSize);
+            if (platform is not null && !Validate.IsPlatform(platform))
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["platform"] = [$"One of: {string.Join(", ", Validate.Platforms)}."] });
+            if (sort is not (null or "name") && !(sort == "priority" && platform is not null))
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["sort"] = ["name, or priority with a platform."] });
+            var recipes = db.Recipes.AsQueryable();
+            if (!string.IsNullOrWhiteSpace(search)) recipes = recipes.Where(r => r.PortName.Contains(search));
+            var q = from r in recipes
+                    join pp in db.PortPriorities.Where(p => p.Platform == platform) on r.PortName equals pp.PortName into g
+                    from pp in g.DefaultIfEmpty()
+                    select new { r, pp };
+            return Results.Ok(await Paged<RecipeDto>.FromAsync(q, o => (sort == "priority" ? o.OrderByDescending(x => x.pp == null ? 0 : x.pp.Priority).ThenBy(x => x.r.PortName) : o.OrderBy(x => x.r.PortName))
+                    .ThenByDescending(x => x.r.Version).ThenBy(x => x.r.Id),
+                x => new RecipeDto(x.r.Id, x.r.PortName, x.r.Category, x.r.Version, x.r.RecipePath, x.r.RecipeUpdatedAt,
+                    x.pp == null ? null : x.pp.Priority, x.pp == null ? null : x.pp.Dependents, x.pp == null ? null : x.pp.Outstanding), page, pageSize));
+        });
+
+        g.MapGet("/priorities", async (AppDbContext db, PriorityComputer priorities) =>
+        {
+            var stats = await db.PortPriorities.GroupBy(p => p.Platform)
+                .Select(x => new { Platform = x.Key, ComputedAt = (DateTime?)x.Max(p => p.ComputedAt), Outstanding = x.Count(p => p.Outstanding) })
+                .ToDictionaryAsync(x => x.Platform);
+            return new
+            {
+                priorities.Running, priorities.LastError,
+                Platforms = Validate.Platforms.Select(p => stats.TryGetValue(p, out var s) ? s : new { Platform = p, ComputedAt = (DateTime?)null, Outstanding = 0 }),
+            };
+        });
+
+        g.MapPost("/priorities/recompute", (PriorityComputer priorities) =>
+        {
+            priorities.RequestNow();
+            return Results.Accepted();
+        });
+
+        // The highest-priority outstanding ports with nothing published, queued or building on the platform yet.
+        g.MapPost("/priorities/{platform}/queue-top", async (string platform, QueueTopRequest? req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
+        {
+            if (!Validate.IsPlatform(platform)) return Results.NotFound();
+            var count = req?.Count ?? 20;
+            if (count is < 1 or > 200) return Results.ValidationProblem(new Dictionary<string, string[]> { ["count"] = ["From 1 to 200."] });
+            var top = await db.PortPriorities.Include(p => p.Recipe)
+                .Where(p => p.Platform == platform && p.Outstanding
+                    && !PublicEndpoints.Published(db).Any(k => k.Platform == platform && k.PortName == p.PortName)
+                    && !db.Jobs.Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName && (j.Status == JobStatus.Queued || j.Status == JobStatus.InProgress)))
+                .OrderByDescending(p => p.Priority).ThenBy(p => p.PortName).Take(count).ToListAsync();
+            var ids = new List<long>();
+            foreach (var p in top) ids.AddRange((await QueueAsync(db, p.Recipe!, [platform], users.GetUserId(user)!)).Select(j => j.Id));
+            return Results.Ok(await db.Jobs.Where(j => ids.Contains(j.Id)).OrderBy(j => j.Id).Select(Project.Job).ToListAsync());
         });
 
         g.MapPost("/jobs", async (QueueRequest req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
@@ -108,7 +156,7 @@ public static class AdminEndpoints
 
         // Only published packages (what the listings show); uploads of a running job are left to its client.
         g.MapDelete("/repo/{platform}/packages/{fileName}", async (string platform, string fileName, ClaimsPrincipal user, AppDbContext db,
-            BlobContainerClient blobs, RepoIndexer indexer, ILoggerFactory logs) =>
+            BlobContainerClient blobs, RepoIndexer indexer, PriorityComputer priorities, ILoggerFactory logs) =>
         {
             if (!Validate.IsPlatform(platform) || !Validate.IsHpkgName(fileName)) return Results.NotFound();
             var pkg = await PublicEndpoints.Published(db).FirstOrDefaultAsync(p => p.Platform == platform && p.FileName == fileName);
@@ -116,6 +164,7 @@ public static class AdminEndpoints
             db.Packages.Remove(pkg);
             await db.SaveChangesAsync();
             indexer.MarkDirty(platform);
+            priorities.MarkDirty();
             var log = logs.CreateLogger("AdminEndpoints");
             log.LogInformation("{User} deleted package {Platform}/{FileName} (sha256 {Sha256}, job {JobId}, import {ImportId})",
                 user.Identity?.Name, platform, fileName, pkg.Sha256, pkg.JobId, pkg.ImportId);

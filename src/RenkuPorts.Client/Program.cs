@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Configuration;
@@ -9,19 +10,29 @@ using Microsoft.Extensions.Configuration;
 // renkuports-client: claims build jobs for its platform from the coordinator, runs BuildCommand on each, and
 // uploads the resulting hpkgs (or reports the failure with the build log).
 // Config: appsettings.json (next to the binary, then the working directory), RENKUPORTS_* env vars, --Key value args.
+// `jobs [--mine|--owner] [--status S] [--platform P] [--page N]` and `status` only show the queue (RenkuPorts.Client.InfoCommands).
+if (args.Contains("--version")) { Console.WriteLine(RenkuPorts.Client.BuildClient.Version); return 0; }
+var command = args.FirstOrDefault() is "jobs" or "status" ? args[0] : null;
+string? jobsQuery = null;
+var configArgs = args;
+if (command is not null && !RenkuPorts.Client.InfoCommands.TryParse(command, args[1..], out jobsQuery, out configArgs))
+{
+    Console.Error.WriteLine(RenkuPorts.Client.InfoCommands.Usage);
+    return 2;
+}
 var once = args.Contains("--once");
 var cfg = new ConfigurationBuilder()
     .AddJsonFile(Path.Combine(AppContext.BaseDirectory, "appsettings.json"), optional: true)
     .AddJsonFile(Path.Combine(Environment.CurrentDirectory, "appsettings.json"), optional: true)
     .AddEnvironmentVariables("RENKUPORTS_")
-    .AddCommandLine(args.Where(a => a != "--once").ToArray())
+    .AddCommandLine(configArgs.Where(a => a != "--once").ToArray())
     .Build();
 
 string Required(string key) => cfg[key] is { Length: > 0 } v ? v : throw new InvalidOperationException($"{key} is not configured (appsettings.json, RENKUPORTS_{key.ToUpperInvariant()} or --{key})");
 RenkuPorts.Client.BuildClient worker;
 try
 {
-    worker = new RenkuPorts.Client.BuildClient(new Uri(Required("Server")), Required("ClientId"), Required("Secret"), Required("BuildCommand"),
+    worker = new RenkuPorts.Client.BuildClient(new Uri(Required("Server")), Required("ClientId"), Required("Secret"), command is null ? Required("BuildCommand") : cfg["BuildCommand"] ?? "",
         Path.GetFullPath(cfg["WorkDir"] ?? "work"), TimeSpan.FromSeconds(cfg.GetValue("PollSeconds", 60)));
 }
 catch (InvalidOperationException e)
@@ -31,6 +42,7 @@ catch (InvalidOperationException e)
 }
 
 using var cts = new CancellationTokenSource();
+if (command is not null) return await RenkuPorts.Client.InfoCommands.RunAsync(worker, command, jobsQuery!, cts.Token);
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, c => { c.Cancel = true; cts.Cancel(); });
 return await worker.RunAsync(once, cts.Token);
@@ -49,14 +61,18 @@ namespace RenkuPorts.Client
     public partial class BuildClient(Uri server, string clientId, string secret, string buildCommand, string workDir, TimeSpan poll)
     {
         private const long MaxLogBytes = 5 << 20;
-        private readonly HttpClient _http = new() { BaseAddress = server, Timeout = Timeout.InfiniteTimeSpan };
+        /// <summary>AssemblyInformationalVersion, set at build time with <c>-p:Version=$(scripts/version.sh)</c>.</summary>
+        public static readonly string Version =
+            typeof(BuildClient).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0-dev";
+        private readonly HttpClient _http = new() { BaseAddress = server, Timeout = Timeout.InfiniteTimeSpan,
+            DefaultRequestHeaders = { UserAgent = { new ProductInfoHeaderValue("renkuports-client", Version) } } };
         private string? _token;
         private DateTime _tokenExpires;
 
         /// <summary>Runs until cancelled (or after one job with <paramref name="once"/>). Returns the process exit code.</summary>
         public async Task<int> RunAsync(bool once, CancellationToken ct)
         {
-            Log($"polling {server} every {poll.TotalSeconds}s{(once ? " (once)" : "")}");
+            Log($"renkuports-client {Version}: polling {server} every {poll.TotalSeconds}s{(once ? " (once)" : "")}");
             while (!ct.IsCancellationRequested)
             {
                 try
@@ -79,6 +95,13 @@ namespace RenkuPorts.Client
             }
             Log("stopped");
             return 0;
+        }
+
+        /// <summary>GETs a JSON resource of the client API (path relative to the server, e.g. <c>api/client/me</c>).</summary>
+        public async Task<T> GetAsync<T>(string path, CancellationToken ct)
+        {
+            using var resp = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, path), ct);
+            return await resp.Content.ReadFromJsonAsync<T>(ct) ?? throw new ApiException(resp.StatusCode, "empty response");
         }
 
         private async Task<JobInfo?> NextAsync(CancellationToken ct)
