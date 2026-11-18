@@ -132,8 +132,12 @@ qemu_argv() {
 	local common=(-display none -monitor none -qmp "unix:$QMP,server,nowait" -serial "file:$CACHE/logs/$arch-serial.log"
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -smp "$JOBS")
 	local seed=(-drive "file=$SEED,format=raw,if=none,id=d1,readonly=on")
-	local pci=(-drive "file=$disk,format=qcow2,if=none,id=d0" -device virtio-blk-pci,drive=d0 "${seed[@]}" -device virtio-blk-pci,drive=d1
-		-device virtio-net-pci,netdev=n0)
+	# On q35's root bus QEMU makes virtio devices transitional, and RenkuOS x86_64 fails every I/O through the legacy
+	# interface; modern-only devices work.
+	local m=
+	[ "$arch" = x86_64 ] && m=,disable-legacy=on
+	local pci=(-drive "file=$disk,format=qcow2,if=none,id=d0" -device "virtio-blk-pci,drive=d0$m" "${seed[@]}"
+		-device "virtio-blk-pci,drive=d1$m" -device "virtio-net-pci,netdev=n0$m")
 	case $arch in
 		x86_64)
 			qemu=(qemu-system-x86_64 -machine "q35,accel=$accel" -cpu "$([ "$accel" = kvm ] && echo host || echo max)" "${pci[@]}") ;;
