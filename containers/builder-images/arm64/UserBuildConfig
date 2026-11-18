@@ -1,0 +1,37 @@
+# RenkuPorts arm64 builder image. build.sh copies this to generated.arm64/UserBuildConfig and
+# the contents of files/ (plus generated ssh host keys and an empty file) to /w/files.
+
+HAIKU_IMAGE_SIZE = 40960 ;		# MiB; bfs_shell cannot grow a volume, so ship the final size
+HAIKU_DONT_CLEAR_IMAGE = 1 ;	# keep the image file sparse
+HAIKU_NO_DOWNLOADS = 0 ;		# fetch packages missing from download/ from the arm64 repository
+HAIKU_IMAGE_LABEL = RenkuOS ;
+HAIKU_IMAGE_HOST_NAME = renkuports-builder ;
+
+# HaikuPorter and what --get-dependencies builds need before pkgman can add more.
+AddHaikuImageSystemPackages
+	haikuporter python3.14 openssh coreutils tar curl wget git perl
+	gcc binutils gmp mpc mpfr make mkdepend jam cmake meson ninja autoconf automake libtool m4 bison flex
+	texinfo gettext patch pkgconfig sed grep gawk diffutils findutils which less nano
+	xz_utils zstd bzip2 zip unzip
+	;
+# On arm64 DevelopmentMin leaves these out; HaikuPorter needs them as system packages.
+AddPackageFilesToHaikuImage system packages : haiku_devel.hpkg makefile_engine.hpkg : nameFromMetaInfo ;
+
+RENKUPORTS_FILES = /w/files ;
+# Boot step that installs the container's key from the RENKUSEED seed disk.
+AddFilesToHaikuImage system settings launch : $(RENKUPORTS_FILES)/renkuseed.launch : renkuseed ;
+AddFilesToHaikuImage system non-packaged bin : $(RENKUPORTS_FILES)/renkuseed.sh : renkuseed ;
+# Without it the first boot runs FirstBootPrompt instead of the desktop.
+AddFilesToHaikuImage home config settings : $(RENKUPORTS_FILES)/empty : "Locale settings" ;
+# Host keys made at image build time, so sshd listens on the first boot (net_server starts it
+# before the openssh post-install script would make them).
+AddFilesToHaikuImage system settings ssh
+	: $(RENKUPORTS_FILES)/ssh/ssh_host_ed25519_key $(RENKUPORTS_FILES)/ssh/ssh_host_ed25519_key.pub
+	  $(RENKUPORTS_FILES)/ssh/ssh_host_ecdsa_key $(RENKUPORTS_FILES)/ssh/ssh_host_ecdsa_key.pub
+	  $(RENKUPORTS_FILES)/ssh/ssh_host_rsa_key $(RENKUPORTS_FILES)/ssh/ssh_host_rsa_key.pub
+	;
+# The privilege separation user sshd needs. The openssh package only gets it from first-boot
+# processing, after net_server has started sshd, which then exits. sshd does not use the home.
+AddGroupToHaikuImage sshd : 1001 : sshd ;
+AddUserToHaikuImage sshd : 1001 : 1001 : /packages/openssh-10.6p1-1/.self/data/openssh/empty : /bin/true
+	: "sshd user" ;
