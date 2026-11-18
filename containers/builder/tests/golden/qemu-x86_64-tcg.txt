@@ -6,13 +6,13 @@ max
 -drive
 file=/cache/work/x86_64.qcow2,format=qcow2,if=none,id=d0
 -device
-virtio-blk-pci,drive=d0
+virtio-blk-pci,drive=d0,disable-legacy=on
 -drive
 file=/run/seed.img,format=raw,if=none,id=d1,readonly=on
 -device
-virtio-blk-pci,drive=d1
+virtio-blk-pci,drive=d1,disable-legacy=on
 -device
-virtio-net-pci,netdev=n0
+virtio-net-pci,netdev=n0,disable-legacy=on
 -display
 none
 -monitor
