@@ -343,4 +343,65 @@ public partial class ApiTests
             await app.WithDbAsync(async db => Assert.Equal(2, await db.JobBuilds.CountAsync(b => b.JobId == job.Id)));
         }
     }
+
+    [Fact]
+    public async Task Redigest_migration_rejudges_undecided_jobs_and_leaves_decided_ones_alone()
+    {
+        var admin = await app.SignedInAsync();
+        var (_, c1) = await app.BuildClientAsync(admin);
+        var (_, c2) = await app.BuildClientAsync(admin);
+        async Task Stale(long jobId) => await app.WithDbAsync(async db =>
+        {
+            await db.StagedPackages.Where(p => p.Build!.JobId == jobId).ExecuteUpdateAsync(s => s.SetProperty(p => p.Digest, p => "old" + p.Id));
+            await db.JobBuilds.Where(b => b.JobId == jobId).ExecuteUpdateAsync(s => s.SetProperty(b => b.Digest, b => "old" + b.Number));
+        });
+        async Task<List<string?>> Digests(long jobId)
+        {
+            List<string?> d = [];
+            await app.WithDbAsync(async db => d = [.. await db.JobBuilds.Where(b => b.JobId == jobId).OrderBy(b => b.Number).Select(b => b.Digest).ToListAsync(),
+                .. await db.StagedPackages.Where(p => p.Build!.JobId == jobId).OrderBy(p => p.Id).Select(p => p.Digest).ToListAsync()]);
+            return d;
+        }
+
+        // Decided: a Failed job (blobs kept for an override) and a Succeeded one, both with old-rule digests.
+        var failed = await QueueAsync(admin, "foo");
+        var foo = Hpkg("foo");
+        await BuildOnceAsync(c1, foo, Bytes("foo a"));
+        Assert.Equal("Queued", (await BuildOnceAsync(c2, foo, Bytes("foo b, longer"))).Status);
+        await app.WithDbAsync(db => db.Jobs.Where(j => j.Id == failed.Id).ExecuteUpdateAsync(s => s.SetProperty(j => j.Status, JobStatus.Failed)));
+        await Stale(failed.Id);
+        var succeeded = await QueueAsync(admin, "openexr30");
+        var exr = Hpkg("openexr30");
+        await BuildOnceAsync(c1, exr, [5]);
+        Assert.Equal("Succeeded", (await BuildOnceAsync(c2, exr, [5])).Status);
+        await Stale(succeeded.Id);
+
+        // Undecided: same bytes from two clients, but build 2's stored digests are from the old rule (the packager differed), so it
+        // was queued for a third build.
+        var job = await QueueAsync(admin, "zlib");
+        var name = Hpkg("zlib");
+        Assert.Equal("Queued", (await BuildOnceAsync(c1, name, [7, 7])).Status);
+        Assert.Equal(job.Id, (await ClaimAsync(c2)).JobId);
+        Assert.Equal(HttpStatusCode.OK, (await UploadAsync(c2, job.Id, name, [7, 7])).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await c2.PostAsJsonAsync($"/api/client/jobs/{job.Id}/complete", new { log = "" })).StatusCode);
+        await app.WithDbAsync(async db =>
+        {
+            await db.StagedPackages.Where(p => p.Build!.JobId == job.Id && p.Build.Number == 2).ExecuteUpdateAsync(s => s.SetProperty(p => p.Digest, "old"));
+            await db.JobBuilds.Where(b => b.JobId == job.Id && b.Number == 2).ExecuteUpdateAsync(s => s.SetProperty(b => b.Digest, "old").SetProperty(b => b.DiffJson, "[]"));
+            await db.Jobs.Where(j => j.Id == job.Id).ExecuteUpdateAsync(s => s.SetProperty(j => j.Status, JobStatus.Queued));
+        });
+        var (failedBefore, succeededBefore) = (await Digests(failed.Id), await Digests(succeeded.Id));
+
+        await app.WithDbAsync(db => db.Database.ExecuteSqlRawAsync(RenkuPorts.Server.Data.Migrations.RedigestWithoutPackager.Sql));
+        Assert.Equal("Verifying", (await VerifiedJobAsync(job.Id)).Status);
+        await app.VerifyAsync();
+
+        var done = await VerifiedJobAsync(job.Id);
+        Assert.Equal(("Succeeded", "Match", done.Builds[0].Id), (done.Status, done.Approval, done.ApprovedBuildId));
+        Assert.Equal(done.Builds[0].Digest, done.Builds[1].Digest);
+        Assert.Equal("Failed", (await VerifiedJobAsync(failed.Id)).Status);
+        Assert.Equal(failedBefore, await Digests(failed.Id));
+        Assert.Equal("Succeeded", (await VerifiedJobAsync(succeeded.Id)).Status);
+        Assert.Equal(succeededBefore, await Digests(succeeded.Id));
+    }
 }
