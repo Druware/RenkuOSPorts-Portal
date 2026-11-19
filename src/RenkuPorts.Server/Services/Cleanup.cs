@@ -202,4 +202,47 @@ public static partial class Cleanup
         }
         return tally;
     }
+
+    /// <summary>What <see cref="ResetAsync"/> deleted on one platform: rows per table, and blobs (packages, logs, index files).</summary>
+    public sealed record ResetTally(string Platform, int Jobs, int Builds, int StagedPackages, int Packages, int Imports, int Blobs, long Bytes);
+
+    /// <summary>
+    /// Danger zone: deletes everything built or imported for <paramref name="platform"/> (jobs with their builds and staged uploads, packages,
+    /// imports, build logs, package blobs and the repository index files), so the platform starts from scratch. Users, clients, recipes,
+    /// priorities and settings stay. The caller marks the index and priorities dirty.
+    /// </summary>
+    /// <remarks>
+    /// Every row is per platform (a job is for one platform; builds and staged rows belong to a job). Rows go first, in one transaction,
+    /// then the blobs: a row never names a deleted blob, and a blob left behind by a failure is an orphan <see cref="OrphansAsync"/> removes.
+    /// </remarks>
+    public static async Task<ResetTally> ResetAsync(AppDbContext db, BlobContainerClient blobs, string platform)
+    {
+        List<string> names = [];
+        List<long> logs = [];
+        int jobs = 0, builds = 0, staged = 0, packages = 0, imports = 0;
+        await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var tx = await db.Database.BeginTransactionAsync();
+            names = await db.Packages.Where(p => p.Platform == platform).Select(p => p.BlobName)
+                .Concat(db.StagedPackages.Where(s => s.Build!.Job!.Platform == platform && s.BlobName != "").Select(s => s.BlobName)).Distinct().ToListAsync();
+            logs = await db.Jobs.Where(j => j.Platform == platform && j.HasLog).Select(j => j.Id).ToListAsync();
+            // Children before parents: Packages -> Jobs and Imports, StagedPackages -> JobBuilds -> Jobs (no cascades from Jobs).
+            packages = await db.Packages.Where(p => p.Platform == platform).ExecuteDeleteAsync();
+            staged = await db.StagedPackages.Where(s => s.Build!.Job!.Platform == platform).ExecuteDeleteAsync();
+            builds = await db.JobBuilds.Where(b => b.Job!.Platform == platform).ExecuteDeleteAsync();
+            jobs = await db.Jobs.Where(j => j.Platform == platform).ExecuteDeleteAsync();
+            imports = await db.Imports.Where(i => i.Platform == platform).ExecuteDeleteAsync();
+            await tx.CommitAsync();
+        });
+
+        int count = 0;
+        long bytes = 0;
+        foreach (var name in names)
+            if (await DeleteIfUnreferencedAsync(db, blobs, name) is > 0 and var size) { count++; bytes += size; }
+        // The index goes now, not at the next build: with the Haiku tools missing there is none, and the old repo must not stay served.
+        var other = logs.Select(BuildClientApi.LogBlob).Concat(new[] { "repo.sha256", "repo", "repo.info", "state.json" }.Select(f => RepoIndexer.IndexBlob(platform, f)));
+        foreach (var name in other)
+            if (await blobs.GetBlobClient(name).DeleteIfExistsAsync()) count++;
+        return new(platform, jobs, builds, staged, packages, imports, count, bytes);
+    }
 }

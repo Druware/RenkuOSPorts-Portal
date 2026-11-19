@@ -298,6 +298,19 @@ async function cleanup(kind, dryRun) {
   } catch (e) { fail(e) } finally { cleanBusy.value = false }
 }
 
+// ---- Danger zone: reset a platform (or all) back to scratch; the typed platform name is the confirmation ----
+const reset = reactive({ platform: PLATFORMS[0], confirm: '' })
+async function resetPlatform() {
+  const what = reset.platform === 'all' ? 'all architectures' : reset.platform
+  if (!confirm(`Reset ${what}?\n\nEvery job, build, staged upload, published package, import and build log of ${what} is deleted and its repository emptied. Users, clients and recipes stay. This cannot be undone.`)) return
+  cleanBusy.value = true
+  try {
+    const result = await api('/admin/reset', { method: 'POST', body: { platform: reset.platform, confirm: reset.confirm } })
+    reset.confirm = ''
+    ok(`Reset: ${result.map((t) => `${t.platform} ${t.jobs} jobs, ${t.builds} builds, ${t.stagedPackages} staged, ${t.packages} packages, ${t.imports} imports, ${t.blobs} files (${formatBytes(t.bytes)})`).join('; ')}.`)
+  } catch (e) { fail(e) } finally { cleanBusy.value = false }
+}
+
 watch(tab, (t) => {
   notice.value = ''
   if (t === 'dashboard') loadDashboard()
@@ -494,7 +507,8 @@ watch(tab, (t) => {
     <Pager v-if="pkgs.total" :page="pkgs.page" :page-size="pkgs.pageSize" :total="pkgs.total" @update:page="goToPackagePage" />
   </HaikuWindow>
 
-  <HaikuWindow v-else-if="tab === 'maintenance'" title="Maintenance">
+  <template v-else-if="tab === 'maintenance'">
+  <HaikuWindow title="Maintenance">
     <form class="form" @submit.prevent="cleanup('logs', true)">
       <h3>Build logs</h3>
       <p class="muted small">Deletes the logs of succeeded, failed and cancelled jobs. Jobs still queued, building, verifying or awaiting an override keep theirs.</p>
@@ -530,6 +544,23 @@ watch(tab, (t) => {
       </ul>
     </form>
   </HaikuWindow>
+
+  <HaikuWindow title="Danger zone" class="win-danger">
+    <form class="form" @submit.prevent="resetPlatform">
+      <p class="text-danger">Resets an architecture to scratch: deletes its job queue and history, staged uploads, published packages and their files, imports and repository index. Users, build clients, recipes and settings are kept.</p>
+      <label for="dz-platform">Architecture</label>
+      <select id="dz-platform" v-model="reset.platform">
+        <option v-for="p in PLATFORMS" :key="p" :value="p">{{ p }}</option>
+        <option value="all">All architectures</option>
+      </select>
+      <label for="dz-confirm">Type <code>{{ reset.platform }}</code> to confirm</label>
+      <input id="dz-confirm" v-model="reset.confirm" type="text" autocomplete="off" spellcheck="false" class="input-narrow" />
+      <div class="toolbar">
+        <button type="submit" class="btn btn-danger" :disabled="cleanBusy || reset.confirm !== reset.platform">Reset</button>
+      </div>
+    </form>
+  </HaikuWindow>
+  </template>
 
   <template v-else-if="tab === 'import'">
     <HaikuWindow title="Import from a repository">
