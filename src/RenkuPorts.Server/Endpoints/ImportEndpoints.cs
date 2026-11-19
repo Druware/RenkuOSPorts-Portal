@@ -10,7 +10,13 @@ namespace RenkuPorts.Server.Endpoints;
 /// <summary>Admin-only: import the packages another pkgman repository has and this one lacks (see <see cref="RepoImporter"/>).</summary>
 public static class ImportEndpoints
 {
-    public record ImportRequest(string? SourceUrl, string? Platform, bool DryRun);
+    /// <summary>Starts an import. The optional settings keep it gentle on the source; omitted, it runs 4 downloads at once, unpaced.</summary>
+    /// <param name="Parallelism">Downloads at once, 1 to 4.</param>
+    /// <param name="DelayMinSeconds">Shortest random pause before each download, 0 to 300 seconds.</param>
+    /// <param name="DelayMaxSeconds">Longest random pause before each download, 0 to 300 seconds, at least <paramref name="DelayMinSeconds"/>.</param>
+    /// <param name="MaxKilobytesPerSecond">Limit for the whole import in KiB/s, 16 to 1,000,000; 0 for none.</param>
+    public record ImportRequest(string? SourceUrl, string? Platform, bool DryRun, int? Parallelism = null, double? DelayMinSeconds = null,
+        double? DelayMaxSeconds = null, int? MaxKilobytesPerSecond = null);
 
     public record ImportDto(long Id, string SourceUrl, string Platform, bool DryRun, ImportStatus Status, DateTime StartedAt, DateTime? FinishedAt,
         string StartedBy, int Total, int Missing, int Imported, List<SkippedPackage> Skipped, string? Error);
@@ -28,6 +34,14 @@ public static class ImportEndpoints
                 return Results.ValidationProblem(new Dictionary<string, string[]> { ["sourceUrl"] = ["An http or https repository base URL."] });
             if (!Validate.IsPlatform(req.Platform))
                 return Results.ValidationProblem(new Dictionary<string, string[]> { ["platform"] = [$"One of: {string.Join(", ", Validate.Platforms)}."] });
+            var options = new RepoImporter.Options(req.Parallelism ?? 4, req.DelayMinSeconds ?? 0, req.DelayMaxSeconds ?? req.DelayMinSeconds ?? 0, req.MaxKilobytesPerSecond ?? 0);
+            var bad = new Dictionary<string, string[]>();
+            if (options.Parallelism is < 1 or > 4) bad["parallelism"] = ["From 1 to 4."];
+            if (options.DelayMinSeconds is not (>= 0 and <= 300)) bad["delayMinSeconds"] = ["From 0 to 300 seconds."];
+            if (options.DelayMaxSeconds is not (>= 0 and <= 300)) bad["delayMaxSeconds"] = ["From 0 to 300 seconds."];
+            else if (options.DelayMaxSeconds < options.DelayMinSeconds) bad["delayMaxSeconds"] = ["At least the minimum pause."];
+            if (options.MaxKilobytesPerSecond is not (0 or (>= 16 and <= 1_000_000))) bad["maxKilobytesPerSecond"] = ["0 for no limit, or from 16 to 1000000."];
+            if (bad.Count > 0) return Results.ValidationProblem(bad);
             if (!indexer.Tools.Available) return Results.Problem(statusCode: 503, title: indexer.DisabledReason);
 
             var now = DateTime.UtcNow;
@@ -47,7 +61,7 @@ public static class ImportEndpoints
                 // The filtered unique index allows one Running import per platform.
                 return Results.Problem(statusCode: 409, title: $"An import for {req.Platform} is already running");
             }
-            importer.Start(imp.Id);
+            importer.Start(imp.Id, options);
             return Results.Ok(new { imp.Id });
         });
 

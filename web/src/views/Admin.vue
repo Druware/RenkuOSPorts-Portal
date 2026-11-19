@@ -201,7 +201,7 @@ async function reindex(platform) {
 }
 
 // ---- Import from another pkgman repository (polled every 3 s while one is running) ----
-const importForm = reactive({ sourceUrl: '', platform: 'arm64' })
+const importForm = reactive({ sourceUrl: '', platform: 'arm64', parallelism: 1, delayMinSeconds: 2, delayMaxSeconds: 10, maxKilobytesPerSecond: 1024 })
 const imports = ref([])
 const current = ref(null)
 let importPoll
@@ -572,6 +572,18 @@ watch(tab, (t) => {
         <select id="im-platform" v-model="importForm.platform">
           <option v-for="p in PLATFORMS" :key="p" :value="p">{{ p }}</option>
         </select>
+        <fieldset>
+          <legend>Be gentle on the source</legend>
+          <div><label for="im-par">Parallel downloads</label>
+            <input id="im-par" v-model.number="importForm.parallelism" type="number" min="1" max="4" required class="input-narrow" /></div>
+          <div><label for="im-dmin">Pause between files, min (s)</label>
+            <input id="im-dmin" v-model.number="importForm.delayMinSeconds" type="number" min="0" max="300" step="any" required class="input-narrow" /></div>
+          <div><label for="im-dmax">Pause between files, max (s)</label>
+            <input id="im-dmax" v-model.number="importForm.delayMaxSeconds" type="number" :min="importForm.delayMinSeconds" max="300" step="any" required class="input-narrow" /></div>
+          <div><label for="im-rate">Speed limit (KB/s)</label>
+            <input id="im-rate" v-model.number="importForm.maxKilobytesPerSecond" type="number" min="0" max="1000000" required class="input-narrow" /></div>
+          <p class="muted small">Each download waits a random pause in the range first; the speed limit covers the whole import (0 = unlimited).</p>
+        </fieldset>
         <div class="toolbar">
           <button type="button" class="btn" :disabled="!importForm.sourceUrl || current?.status === 'Running'" @click="startImport(true)">Dry run</button>
           <button type="submit" class="btn btn-primary" :disabled="!importForm.sourceUrl || current?.status === 'Running'">Import</button>

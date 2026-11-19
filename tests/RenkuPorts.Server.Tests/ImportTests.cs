@@ -15,9 +15,11 @@ public partial class ApiTests
     private record SkipView(string FileName, string Reason);
     private record ImportView(long Id, string Status, int Total, int Missing, int Imported, List<SkipView> Skipped, string? Error, string StartedBy);
 
-    private static async Task<ImportView> ImportAsync(HttpClient admin, string url, string platform, bool dryRun)
+    private static async Task<ImportView> ImportAsync(HttpClient admin, string url, string platform, bool dryRun, bool gentle = false)
     {
-        var res = await admin.PostAsJsonAsync("/api/imports", new { sourceUrl = url, platform, dryRun });
+        var res = await admin.PostAsJsonAsync("/api/imports", gentle
+            ? new { sourceUrl = url, platform, dryRun, parallelism = (int?)1, delayMinSeconds = (double?)0, delayMaxSeconds = (double?)0.05, maxKilobytesPerSecond = (int?)64 }
+            : new { sourceUrl = url, platform, dryRun, parallelism = (int?)null, delayMinSeconds = (double?)null, delayMaxSeconds = (double?)null, maxKilobytesPerSecond = (int?)null });
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         var id = (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetInt64();
         for (var i = 0; i < 300; i++)
@@ -37,6 +39,34 @@ public partial class ApiTests
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync("/api/imports", new { sourceUrl = "http://x/repo", platform = "sparc" })).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await (await app.BuilderAsync()).PostAsJsonAsync("/api/imports", new { sourceUrl = "http://x/repo", platform = "arm64" })).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await admin.GetAsync("/api/imports/999999")).StatusCode);
+
+        async Task AssertBad(object body, string key)
+        {
+            var res = await admin.PostAsJsonAsync("/api/imports", body);
+            Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+            Assert.True((await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("errors").TryGetProperty(key, out _), key);
+        }
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", parallelism = 0 }, "parallelism");
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", parallelism = 5 }, "parallelism");
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", delayMinSeconds = 10, delayMaxSeconds = 2 }, "delayMaxSeconds");
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", delayMinSeconds = -1 }, "delayMinSeconds");
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", delayMaxSeconds = 301 }, "delayMaxSeconds");
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", maxKilobytesPerSecond = 8 }, "maxKilobytesPerSecond");
+        await AssertBad(new { sourceUrl = "http://x/repo", platform = "arm64", maxKilobytesPerSecond = 1_000_001 }, "maxKilobytesPerSecond");
+    }
+
+    [Fact]
+    public void Import_throttle_paces_bytes_to_the_rate_without_idle_credit()
+    {
+        var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var next = DateTime.MinValue;
+        // 64 KiB through 32 KiB/s in two chunks read back to back: the second waits for the end of its slot, 2 s in.
+        Assert.Equal(TimeSpan.FromSeconds(1), RepoImporter.Throttle.Reserve(ref next, t0, 32768, 32768));
+        Assert.Equal(TimeSpan.FromSeconds(2), RepoImporter.Throttle.Reserve(ref next, t0, 32768, 32768));
+        // A second worker booking at the same moment queues behind both.
+        Assert.Equal(TimeSpan.FromSeconds(2.5), RepoImporter.Throttle.Reserve(ref next, t0.AddSeconds(0.5), 32768, 32768));
+        // After a long idle spell no burst is allowed: the slot starts now.
+        Assert.Equal(TimeSpan.FromSeconds(1), RepoImporter.Throttle.Reserve(ref next, t0.AddSeconds(60), 32768, 32768));
     }
 
     [HaikuToolsFact]
@@ -69,7 +99,7 @@ public partial class ApiTests
         Assert.Equal("Failed", wrongArch.Status);
         Assert.Contains("architecture is 'arm64'", wrongArch.Error);
 
-        var run = await ImportAsync(admin, server.Url, "arm64", dryRun: false);
+        var run = await ImportAsync(admin, server.Url, "arm64", dryRun: false, gentle: true);
         Assert.Equal(("Completed", 3, 3, 2), (run.Status, run.Total, run.Missing, run.Imported));
         Assert.Equal(real[2], Assert.Single(run.Skipped).FileName);
         Assert.StartsWith("checksum mismatch", run.Skipped[0].Reason);
