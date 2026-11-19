@@ -1,13 +1,24 @@
 // Dev-only mock of the backend contract on :8080 so the SPA can be checked without .NET.
 // Run: npm run mock (then npx vite). Not imported by the app, so it never reaches the bundle.
 // Sign in with any email and password "admin" (Admin) or anything else (Builder); "bad" -> 401.
+// Registered accounts check their password; confirm/reset links are printed to this console.
+// The authenticator code is always 123456.
 import http from 'node:http'
 
 const PLATFORMS = ['x86', 'x86_64', 'arm64', 'riscv64']
 const ago = (h) => new Date(Date.now() - h * 3600e3).toISOString()
 const sha = (s) => [...Array(64)].map((_, i) => '0123456789abcdef'[(s.charCodeAt(i % s.length) * (i + 7)) % 16]).join('')
 
-let user = null
+let user = null // the signed-in account (an entry of `users`)
+let pending2fa = null
+const users = [
+  { id: 'u-ada', email: 'ada@example.com', displayName: 'Ada', roles: ['Builder'], emailConfirmed: true, twoFactorEnabled: true, disabled: false, recovery: [] },
+  { id: 'u-grace', email: 'grace@example.com', displayName: 'Grace Builder', roles: ['Builder'], emailConfirmed: false, twoFactorEnabled: false, disabled: true, recovery: [] },
+]
+const me = (u) => ({ id: u.id, email: u.email, displayName: u.displayName, roles: u.roles, twoFactorEnabled: u.twoFactorEnabled })
+const findUser = (email) => users.find((u) => u.email.toLowerCase() === String(email || '').toLowerCase())
+const newCodes = () => [...Array(10)].map(() => Math.random().toString(36).slice(2, 7) + '-' + Math.random().toString(36).slice(2, 7))
+const SPA = 'http://localhost:5173'
 let nextId = 100
 const ports = [['gcc', '13.2.0'], ['python3.12', '3.12.4'], ['haikuporter', '1.2.7'], ['vim', '9.1.0'], ['curl', '8.9.1'], ['sqlite', '3.46.0'], ['libpng16', '1.6.43'], ['a_rather_long_package_name_for_wrapping_tests', '2024.11.17']]
 const packages = PLATFORMS.flatMap((p, pi) => ports.slice(0, 8 - pi * 2).map(([n, v], i) => ({
@@ -75,12 +86,66 @@ http.createServer(async (req, res) => {
     return packages.some((x) => x.platform === r[1] && x.fileName === decodeURIComponent(r[2])) ? send(res, 200, 'mock hpkg', 'application/octet-stream') : send(res, 404)
   }
   if (p === '/api/auth/providers') return send(res, 200, ['GitHub'])
-  if (p === '/api/auth/me') return user ? send(res, 200, user) : problem(res, 401, 'Unauthorized')
+  if (p === '/api/auth/me') return user ? send(res, 200, me(user)) : problem(res, 401, 'Unauthorized')
+  if (p === '/api/auth/registration') return send(res, 200, { enabled: true })
+  if (p === '/api/auth/register' && req.method === 'POST') {
+    const { email, password, displayName } = await readJson(req)
+    if (!/^\S+@\S+$/.test(email || '')) return send(res, 400, { status: 400, title: 'One or more validation errors occurred.', errors: { email: ['Email is invalid.'] } }, 'application/problem+json')
+    if ((password || '').length < 8) return send(res, 400, { status: 400, title: 'One or more validation errors occurred.', errors: { password: ['Passwords must be at least 8 characters.'] } }, 'application/problem+json')
+    if (!findUser(email)) {
+      const u = { id: 'u' + nextId++, email, password, displayName, roles: ['Builder'], emailConfirmed: false, twoFactorEnabled: false, disabled: false, recovery: [] }
+      users.push(u)
+      console.log(`  confirm link: ${SPA}/confirm-email?userId=${u.id}&token=tok-${u.id}`)
+    }
+    return send(res, 202, {})
+  }
+  if (p === '/api/auth/confirm-email' && req.method === 'POST') {
+    const { userId, token } = await readJson(req)
+    const u = users.find((x) => x.id === userId)
+    if (!u || token !== `tok-${u.id}`) return problem(res, 400, 'Invalid or expired link')
+    u.emailConfirmed = true
+    return send(res, 204)
+  }
+  if (p === '/api/auth/resend-confirmation' && req.method === 'POST') {
+    const u = findUser((await readJson(req)).email)
+    if (u && !u.emailConfirmed) console.log(`  confirm link: ${SPA}/confirm-email?userId=${u.id}&token=tok-${u.id}`)
+    return send(res, 202, {})
+  }
+  if (p === '/api/auth/forgot-password' && req.method === 'POST') {
+    const u = findUser((await readJson(req)).email)
+    if (u?.emailConfirmed && !u.disabled) console.log(`  reset link: ${SPA}/reset-password?email=${encodeURIComponent(u.email)}&token=reset-${u.id}`)
+    return send(res, 202, {})
+  }
+  if (p === '/api/auth/reset-password' && req.method === 'POST') {
+    const { email, token, password } = await readJson(req)
+    const u = findUser(email)
+    if (!u || token !== `reset-${u.id}`) return problem(res, 400, 'Invalid or expired link')
+    if ((password || '').length < 8) return send(res, 400, { status: 400, title: 'One or more validation errors occurred.', errors: { password: ['Passwords must be at least 8 characters.'] } }, 'application/problem+json')
+    u.password = password
+    return send(res, 204)
+  }
   if (p === '/api/auth/login' && req.method === 'POST') {
     const { email, password } = await readJson(req)
     if (!email || password === 'bad') return problem(res, 401, 'Unauthorized')
-    user = { id: 'u1', email, displayName: email.split('@')[0], roles: password === 'admin' ? ['Admin', 'Builder'] : ['Builder'] }
-    return send(res, 200, user)
+    if (password === 'slow') return send(res, 429, '') // to see the rate-limit message
+    let u = findUser(email)
+    if (u?.password !== undefined && u.password !== password) return problem(res, 401, 'Unauthorized')
+    if (!u) users.push(u = { id: 'u' + nextId++, email, displayName: email.split('@')[0], roles: password === 'admin' ? ['Admin', 'Builder'] : ['Builder'], emailConfirmed: true, twoFactorEnabled: false, disabled: false, recovery: [] })
+    if (!u.emailConfirmed) return problem(res, 403, 'Confirm your email address first')
+    if (u.disabled) return problem(res, 403, 'Account disabled')
+    if (u.twoFactorEnabled) { pending2fa = u; return send(res, 200, { twoFactorRequired: true }) }
+    user = u
+    return send(res, 200, me(u))
+  }
+  if (p === '/api/auth/login/2fa' && req.method === 'POST') {
+    const { code, recoveryCode } = await readJson(req)
+    const u = pending2fa
+    const i = u ? u.recovery.indexOf(recoveryCode) : -1
+    if (!u || !(code === '123456' || i >= 0)) return problem(res, 401, 'Invalid code')
+    if (i >= 0) u.recovery.splice(i, 1)
+    user = u
+    pending2fa = null
+    return send(res, 200, me(u))
   }
   if (p === '/api/auth/logout') { user = null; return send(res, 204) }
   if ((r = m(/^\/api\/auth\/external\/(.+)$/))) {
@@ -90,7 +155,44 @@ http.createServer(async (req, res) => {
   }
 
   if (!user) return problem(res, 401, 'Unauthorized')
-  if (p === '/api/clients' && req.method === 'GET') return send(res, 200, clients)
+  // Codes for the signed-in user: 123456, or (where noted) an unused recovery code.
+  const codeOk = async (recoveryOk) => {
+    const { code } = await readJson(req)
+    const i = recoveryOk ? user.recovery.indexOf(code) : -1
+    if (i >= 0) user.recovery.splice(i, 1)
+    return code === '123456' || i >= 0
+  }
+  if (p === '/api/auth/mfa') return send(res, 200, { enabled: user.twoFactorEnabled, recoveryCodesLeft: user.recovery.length })
+  if (p === '/api/auth/mfa/setup' && req.method === 'POST') {
+    if (user.twoFactorEnabled) return problem(res, 400, 'Turn off two-factor sign-in first')
+    const key = 'JBSWY3DPEHPK3PXP'
+    return send(res, 200, { sharedKey: key, otpauthUri: `otpauth://totp/RenkuOS%20Ports:${encodeURIComponent(user.email)}?secret=${key}&issuer=RenkuOS%20Ports&digits=6` })
+  }
+  if (p === '/api/auth/mfa/enable' && req.method === 'POST') {
+    if (!(await codeOk(false))) return problem(res, 400, 'Invalid code')
+    user.twoFactorEnabled = true
+    return send(res, 200, { recoveryCodes: (user.recovery = newCodes()) })
+  }
+  if (p === '/api/auth/mfa/disable' && req.method === 'POST') {
+    if (!(await codeOk(true))) return problem(res, 400, 'Invalid code')
+    Object.assign(user, { twoFactorEnabled: false, recovery: [] })
+    return send(res, 204)
+  }
+  if (p === '/api/auth/mfa/recovery-codes' && req.method === 'POST') {
+    if (!(await codeOk(true))) return problem(res, 400, 'Invalid code')
+    return send(res, 200, { recoveryCodes: (user.recovery = newCodes()) })
+  }
+  if (p === '/api/auth/password' && req.method === 'POST') {
+    const { currentPassword, newPassword } = await readJson(req)
+    if (user.password === undefined) return problem(res, 400, 'No local password; use Forgot password to set one')
+    if (user.password !== currentPassword) return send(res, 400, { status: 400, title: 'One or more validation errors occurred.', errors: { password: ['Incorrect password.'] } }, 'application/problem+json')
+    if ((newPassword || '').length < 8) return send(res, 400, { status: 400, title: 'One or more validation errors occurred.', errors: { password: ['Passwords must be at least 8 characters.'] } }, 'application/problem+json')
+    user.password = newPassword
+    return send(res, 204)
+  }
+  if (p === '/api/clients' && req.method === 'GET') {
+    return send(res, 200, admin && url.searchParams.get('all') === 'true' ? clients : clients.filter((c) => c.owner === user.displayName))
+  }
   if (p === '/api/clients' && req.method === 'POST') {
     const { name, platform } = await readJson(req)
     const c = { id: nextId++, name, platform, owner: user.displayName, enabled: true, createdAt: new Date().toISOString(), lastSeenAt: null }
@@ -113,6 +215,25 @@ http.createServer(async (req, res) => {
     recentFailures: jobs.filter((j) => j.status === 'Failed'),
     clients,
   })
+  if (p === '/api/admin/users') {
+    const s = (url.searchParams.get('search') || '').toLowerCase()
+    return send(res, 200, paged(url, users.filter((u) => (u.email + ' ' + u.displayName).toLowerCase().includes(s)).map((u) => ({
+      id: u.id, email: u.email, displayName: u.displayName, roles: u.roles, emailConfirmed: u.emailConfirmed,
+      twoFactorEnabled: u.twoFactorEnabled, disabled: u.disabled, clientCount: clients.filter((c) => c.owner === u.displayName).length,
+    }))))
+  }
+  if ((r = m(/^\/api\/admin\/users\/([^/]+)\/(admin|disable|enable)$/))) {
+    const u = users.find((x) => x.id === decodeURIComponent(r[1]))
+    if (!u) return problem(res, 404, 'Not found')
+    if (r[2] === 'admin' && req.method === 'DELETE') {
+      if (u === user) return problem(res, 409, 'You cannot remove your own admin role')
+      if (users.filter((x) => x.roles.includes('Admin')).length <= 1) return problem(res, 409, 'Cannot remove the last admin')
+      u.roles = u.roles.filter((x) => x !== 'Admin')
+    } else if (r[2] === 'admin') { if (!u.roles.includes('Admin')) u.roles = ['Admin', ...u.roles] }
+    else if (r[2] === 'disable') { if (u === user) return problem(res, 409, 'You cannot disable yourself'); u.disabled = true }
+    else u.disabled = false
+    return send(res, 204)
+  }
   if (p === '/api/recipes/sync') return send(res, 200, { added: 0, updated: 2, total: recipes.length })
   if (p === '/api/settings/auto-update' && req.method === 'GET') return send(res, 200, autoUpdate)
   if (p === '/api/settings/auto-update' && req.method === 'PUT') {

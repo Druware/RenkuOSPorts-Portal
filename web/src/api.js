@@ -28,10 +28,12 @@ export async function api(path, { method = 'GET', body, text = false } = {}) {
   })
   if (res.status === 401) store.user = null
   if (!res.ok) {
-    let message = `${res.status} ${res.statusText}`
+    let message = res.status === 429 ? 'Too many attempts, try again later.' : `${res.status} ${res.statusText}`
     try {
       const problem = await res.json()
-      message = problem.detail || problem.title || message
+      // Validation problems carry the useful text (e.g. password rules) under `errors`, not in the title.
+      const errors = problem.errors && Object.values(problem.errors).flat().join(' ')
+      message = problem.detail || errors || problem.title || message
     } catch { /* body was not problem+json; keep the status line */ }
     throw new ApiError(res.status, message)
   }

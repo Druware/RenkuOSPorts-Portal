@@ -35,8 +35,8 @@ public static partial class BuildClientApi
         app.MapPost("/api/client/token", async (TokenRequest req, AppDbContext db, IConfiguration cfg, HttpContext http, ILoggerFactory logs) =>
         {
             if (!Guid.TryParse(req.ClientId, out var id) || string.IsNullOrEmpty(req.Secret)) return BadCredentials();
-            var client = await db.BuildClients.FindAsync(id);
-            if (client is null || !client.Enabled || !CryptographicOperations.FixedTimeEquals(
+            var client = await db.BuildClients.Include(c => c.Owner).FirstOrDefaultAsync(c => c.Id == id);
+            if (client is null || !client.Enabled || client.Owner!.Disabled || !CryptographicOperations.FixedTimeEquals(
                     Convert.FromHexString(client.SecretHash), Convert.FromHexString(ClientsEndpoints.HashSecret(req.Secret))))
                 return BadCredentials();
 
@@ -59,11 +59,11 @@ public static partial class BuildClientApi
 
         var api = app.MapGroup("/api/client").RequireAuthorization("BuildClient").AddEndpointFilter(async (ctx, next) =>
         {
-            // A token outlives a deleted or disabled client, so check the client on every call (and record it as seen).
+            // A token outlives a deleted or disabled client (or owner), so check the client on every call (and record it as seen).
             var http = ctx.HttpContext;
             var db = http.RequestServices.GetRequiredService<AppDbContext>();
-            var client = Guid.TryParse(http.User.FindFirstValue("sub"), out var id) ? await db.BuildClients.FindAsync(id) : null;
-            if (client is null || !client.Enabled) return Results.Unauthorized();
+            var client = Guid.TryParse(http.User.FindFirstValue("sub"), out var id) ? await db.BuildClients.Include(c => c.Owner).FirstOrDefaultAsync(c => c.Id == id) : null;
+            if (client is null || !client.Enabled || client.Owner!.Disabled) return Results.Unauthorized();
             client.LastSeenAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
             http.Items[ClientItem] = client;

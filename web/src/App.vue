@@ -35,6 +35,7 @@ async function signOut() {
       <RouterLink v-if="store.user" to="/clients">Build clients</RouterLink>
       <RouterLink v-if="isAdmin()" to="/admin">Admin</RouterLink>
       <template v-if="store.user">
+        <RouterLink to="/account">Account</RouterLink>
         <span class="who" :title="store.user.email">{{ store.user.displayName || store.user.email }}</span>
         <button type="button" class="btn btn-small" @click="signOut">Sign out</button>
       </template>

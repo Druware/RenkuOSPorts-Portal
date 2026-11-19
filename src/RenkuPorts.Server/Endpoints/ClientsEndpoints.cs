@@ -8,7 +8,7 @@ using RenkuPorts.Server.Services;
 
 namespace RenkuPorts.Server.Endpoints;
 
-/// <summary>Build-client registration by signed-in users (own clients; Admin sees all).</summary>
+/// <summary>Build-client registration by signed-in users (own clients; Admin sees all with <c>?all=true</c>).</summary>
 public static class ClientsEndpoints
 {
     public record CreateClientRequest(string Name, string Platform);
@@ -17,8 +17,8 @@ public static class ClientsEndpoints
     {
         var g = app.MapGroup("/api/clients").RequireAuthorization();
 
-        g.MapGet("", async (ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
-            await Visible(db, user, users).OrderBy(c => c.Name).Select(Project.Client).ToListAsync());
+        g.MapGet("", async (bool? all, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
+            await Visible(db, user, users, all == true).OrderBy(c => c.Name).Select(Project.Client).ToListAsync());
 
         g.MapPost("", async (CreateClientRequest req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
         {
@@ -41,7 +41,7 @@ public static class ClientsEndpoints
 
         g.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db, BlobContainerClient blobs) =>
         {
-            var client = await Visible(db, user, users).FirstOrDefaultAsync(c => c.Id == id);
+            var client = await Visible(db, user, users, all: true).FirstOrDefaultAsync(c => c.Id == id);
             if (client is null) return Results.NotFound();
             // Its claimed builds go back to the queue rather than waiting out the lease, minus what they uploaded; its completed builds
             // keep counting (under their recorded client name).
@@ -53,10 +53,11 @@ public static class ClientsEndpoints
         });
     }
 
-    private static IQueryable<BuildClient> Visible(AppDbContext db, ClaimsPrincipal user, UserManager<AppUser> users)
+    /// <summary>The caller's own clients; every client when <paramref name="all"/> and the caller is an admin.</summary>
+    private static IQueryable<BuildClient> Visible(AppDbContext db, ClaimsPrincipal user, UserManager<AppUser> users, bool all)
     {
         var id = users.GetUserId(user);
-        return user.IsInRole("Admin") ? db.BuildClients : db.BuildClients.Where(c => c.OwnerId == id);
+        return all && user.IsInRole("Admin") ? db.BuildClients : db.BuildClients.Where(c => c.OwnerId == id);
     }
 
     /// <summary>SHA-256 hex of a client secret. A plain hash is enough: secrets are 256 random bits, not passwords.</summary>

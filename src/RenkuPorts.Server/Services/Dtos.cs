@@ -4,7 +4,10 @@ using RenkuPorts.Server.Data;
 
 namespace RenkuPorts.Server.Services;
 
-public record MeDto(string Id, string Email, string DisplayName, IList<string> Roles);
+public record MeDto(string Id, string Email, string DisplayName, IList<string> Roles, bool TwoFactorEnabled);
+
+/// <summary>A user as admins see it in <c>/api/admin/users</c>.</summary>
+public record UserDto(string Id, string Email, string DisplayName, List<string> Roles, bool EmailConfirmed, bool TwoFactorEnabled, bool Disabled, int ClientCount);
 
 public record ClientDto(Guid Id, string Name, string Platform, string Owner, bool Enabled, DateTime CreatedAt, DateTime? LastSeenAt);
 

@@ -167,6 +167,9 @@ namespace RenkuPorts.Server.Data.Migrations
                         .IsConcurrencyToken()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<bool>("Disabled")
+                        .HasColumnType("bit");
+
                     b.Property<string>("DisplayName")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
