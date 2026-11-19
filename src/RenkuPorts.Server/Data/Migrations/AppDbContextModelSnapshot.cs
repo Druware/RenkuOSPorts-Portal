@@ -335,6 +335,40 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.ToTable("DateEmbeddingPorts");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.EgressSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int>("MonthlyCapGb")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("EgressSettings");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            MonthlyCapGb = 800
+                        });
+                });
+
+            modelBuilder.Entity("RenkuPorts.Server.Data.EgressUsage", b =>
+                {
+                    b.Property<string>("Month")
+                        .HasMaxLength(7)
+                        .HasColumnType("nvarchar(7)");
+
+                    b.Property<long>("BytesServed")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Month");
+
+                    b.ToTable("EgressUsage");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.Import", b =>
                 {
                     b.Property<long>("Id")

@@ -176,6 +176,18 @@ async function runAuto() {
   } catch (e) { fail(e) } finally { autoBusy.value = false }
 }
 
+// ---- Egress cap (package downloads 404 for the rest of the UTC month once reached) ----
+const egress = ref(null)
+const egressCap = ref(800)
+function showEgress(e) { egress.value = e; egressCap.value = e.monthlyCapGb }
+const egressPercent = (e) => (100 * e.bytesServed / (e.monthlyCapGb * 1024 ** 3)).toFixed(1)
+async function loadEgress() {
+  try { showEgress(await api('/settings/egress')) } catch (e) { fail(e) }
+}
+async function saveEgress() {
+  try { showEgress(await api('/settings/egress', { method: 'PUT', body: { monthlyCapGb: egressCap.value } })); ok('Egress cap saved.') } catch (e) { fail(e) }
+}
+
 async function sync() {
   syncing.value = true
   try {
@@ -318,7 +330,7 @@ watch(tab, (t) => {
   if (t === 'import') loadImports()
   if (t === 'jobs') loadJobs()
   if (t === 'packages') loadPackages()
-  if (t === 'recipes') { if (!recipes.value.items.length) loadRecipes(); loadAuto(); loadPrio() }
+  if (t === 'recipes') { if (!recipes.value.items.length) loadRecipes(); loadAuto(); loadEgress(); loadPrio() }
 })
 </script>
 
@@ -676,6 +688,20 @@ watch(tab, (t) => {
           </details>
         </template>
       </div>
+    </HaikuWindow>
+
+    <HaikuWindow title="Egress cap">
+      <p class="muted small">Package downloads count against a monthly cap (UTC month); once a download would pass it, packages answer 404 until the next month or a higher cap. Repository index files are counted but always served.</p>
+      <p v-if="egress" class="small" aria-live="polite">
+        {{ egress.month }}: {{ formatBytes(egress.bytesServed) }} of {{ egress.monthlyCapGb }} GiB ({{ egressPercent(egress) }}%)
+      </p>
+      <form class="form" @submit.prevent="saveEgress">
+        <label for="eg-cap">Monthly cap (GiB)</label>
+        <input id="eg-cap" v-model.number="egressCap" type="number" min="1" max="1000000" required class="input-narrow" />
+        <div class="toolbar">
+          <button class="btn btn-primary" type="submit">Save</button>
+        </div>
+      </form>
     </HaikuWindow>
 
     <HaikuWindow title="Build priority">

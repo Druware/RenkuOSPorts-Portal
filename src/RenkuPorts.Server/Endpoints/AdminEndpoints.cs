@@ -20,6 +20,9 @@ public static class AdminEndpoints
     public record FileCleanupResult(Tally? Orphans, Tally? Superseded, Tally? Staged, Tally Total);
     /// <summary>Body of <c>POST /api/admin/reset</c>: a platform or <c>all</c>, and <see cref="Confirm"/> repeating it exactly.</summary>
     public record ResetRequest(string Platform, string? Confirm);
+    public record EgressRequest(int MonthlyCapGb);
+    /// <summary>The egress cap and this UTC month's (<see cref="Month"/>, "yyyy-MM") package and index bytes served.</summary>
+    public record EgressDto(int MonthlyCapGb, string Month, long BytesServed);
     public record AutoUpdateDto(bool Enabled, int IntervalHours, string[] Platforms, bool Running, DateTime? LastRunAt, string? LastCommit, AutoUpdateResult? LastResult);
 
     private static async Task<AutoUpdateDto> AutoUpdateAsync(AppDbContext db)
@@ -27,6 +30,13 @@ public static class AdminEndpoints
         var s = await db.AutoUpdateSettings.AsNoTracking().SingleAsync(x => x.Id == AutoUpdateSettings.SingletonId);
         return new(s.Enabled, s.IntervalHours, s.Platforms.Split(',', StringSplitOptions.RemoveEmptyEntries),
             s.RunningSince > DateTime.UtcNow - AutoUpdater.StaleAfter, s.LastRunAt, s.LastCommit, AutoUpdater.ReadResult(s));
+    }
+
+    private static async Task<EgressDto> EgressAsync(AppDbContext db, TimeProvider time)
+    {
+        var month = Egress.Month(time);
+        var cap = await db.EgressSettings.Where(s => s.Id == EgressSettings.SingletonId).Select(s => s.MonthlyCapGb).SingleAsync();
+        return new(cap, month, await db.EgressUsage.Where(u => u.Month == month).Select(u => u.BytesServed).SingleOrDefaultAsync());
     }
 
     public static void Map(WebApplication app)
@@ -346,6 +356,17 @@ public static class AdminEndpoints
             await updater.RunNowAsync(ct) is null
                 ? Results.Problem(statusCode: 409, title: "An auto-update is already running")
                 : Results.Ok(await AutoUpdateAsync(db)));
+
+        g.MapGet("/settings/egress", (AppDbContext db, TimeProvider time) => EgressAsync(db, time));
+
+        g.MapPut("/settings/egress", async (EgressRequest req, ClaimsPrincipal user, AppDbContext db, TimeProvider time, ILoggerFactory logs) =>
+        {
+            if (req.MonthlyCapGb is < 1 or > 1_000_000)
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["monthlyCapGb"] = ["From 1 to 1000000 GB."] });
+            await db.EgressSettings.Where(s => s.Id == EgressSettings.SingletonId).ExecuteUpdateAsync(s => s.SetProperty(x => x.MonthlyCapGb, req.MonthlyCapGb));
+            logs.CreateLogger("AdminEndpoints").LogInformation("{User} set the egress cap to {Gb} GB a month", user.Identity?.Name, req.MonthlyCapGb);
+            return Results.Ok(await EgressAsync(db, time));
+        });
 
         g.MapGet("/dashboard", async (AppDbContext db, RepoIndexer indexer) =>
         {

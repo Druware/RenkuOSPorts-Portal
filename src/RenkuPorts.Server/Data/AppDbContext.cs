@@ -14,6 +14,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<DateEmbeddingPort> DateEmbeddingPorts => Set<DateEmbeddingPort>();
     public DbSet<Import> Imports => Set<Import>();
     public DbSet<AutoUpdateSettings> AutoUpdateSettings => Set<AutoUpdateSettings>();
+    public DbSet<EgressSettings> EgressSettings => Set<EgressSettings>();
+    public DbSet<EgressUsage> EgressUsage => Set<EgressUsage>();
     public DbSet<PortPriority> PortPriorities => Set<PortPriority>();
     public DbSet<PortDependency> PortDependencies => Set<PortDependency>();
 
@@ -115,6 +117,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             e.Property(x => x.Platforms).HasMaxLength(100);
             e.Property(x => x.LastCommit).HasMaxLength(64);
             e.HasData(new AutoUpdateSettings { Id = Data.AutoUpdateSettings.SingletonId, Enabled = false, IntervalHours = 6, Platforms = "arm64" });
+        });
+
+        b.Entity<EgressSettings>(e =>
+        {
+            e.Property(x => x.Id).ValueGeneratedNever();
+            e.HasData(new EgressSettings { Id = Data.EgressSettings.SingletonId, MonthlyCapGb = 800 });
+        });
+
+        b.Entity<EgressUsage>(e =>
+        {
+            e.HasKey(x => x.Month);
+            e.Property(x => x.Month).HasMaxLength(7);
         });
 
         b.Entity<PortPriority>(e =>

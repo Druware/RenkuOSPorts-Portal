@@ -34,12 +34,13 @@ public static class PublicEndpoints
         // pkgman's repository index, built by RepoIndexer; 404 until the platform's first build.
         foreach (var file in new[] { "repo", "repo.info", "repo.sha256" })
         {
-            app.MapGet($"/repo/{{platform}}/{file}", async (string platform, BlobContainerClient blobs, HttpContext ctx) =>
+            app.MapGet($"/repo/{{platform}}/{file}", async (string platform, AppDbContext db, BlobContainerClient blobs, TimeProvider time, HttpContext ctx) =>
             {
                 if (!Validate.IsPlatform(platform)) return Results.NotFound();
                 try
                 {
                     var blob = await blobs.GetBlobClient(RepoIndexer.IndexBlob(platform, file)).DownloadStreamingAsync(cancellationToken: ctx.RequestAborted);
+                    await Egress.TryAddAsync(db, time, blob.Value.Details.ContentLength, enforceCap: false, ctx.RequestAborted); // counted, never blocked
                     ctx.Response.ContentLength = blob.Value.Details.ContentLength;
                     ctx.Response.Headers.CacheControl = "no-cache"; // repo and repo.sha256 must change together
                     return Results.Stream(blob.Value.Content, blob.Value.Details.ContentType ?? "application/octet-stream");
@@ -51,7 +52,7 @@ public static class PublicEndpoints
             });
         }
 
-        app.MapGet("/repo/{platform}/packages/{fileName}", async (string platform, string fileName, AppDbContext db, BlobContainerClient blobs, HttpContext ctx) =>
+        app.MapGet("/repo/{platform}/packages/{fileName}", async (string platform, string fileName, AppDbContext db, BlobContainerClient blobs, TimeProvider time, HttpContext ctx) =>
         {
             if (!Validate.IsPlatform(platform) || !Validate.IsHpkgName(fileName)) return Results.NotFound();
             var pkg = await Published(db).AsNoTracking().FirstOrDefaultAsync(p => p.Platform == platform && p.FileName == fileName);
@@ -59,6 +60,12 @@ public static class PublicEndpoints
             try
             {
                 var blob = await blobs.GetBlobClient(pkg.BlobName).DownloadStreamingAsync(cancellationToken: ctx.RequestAborted);
+                // shortcut: counts the full length up front, so aborted downloads overcount; meter streamed bytes if that ever matters.
+                if (!await Egress.TryAddAsync(db, time, blob.Value.Details.ContentLength, enforceCap: true, ctx.RequestAborted))
+                {
+                    blob.Value.Dispose();
+                    return Results.NotFound(); // this month's egress cap is reached
+                }
                 ctx.Response.ContentLength = blob.Value.Details.ContentLength;
                 return Results.Stream(blob.Value.Content, "application/octet-stream", fileName);
             }

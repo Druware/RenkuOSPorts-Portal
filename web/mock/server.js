@@ -48,6 +48,7 @@ const send = (res, status, body, type = 'application/json') => {
   res.writeHead(status, { 'Content-Type': type })
   res.end(body === undefined ? '' : typeof body === 'string' ? body : JSON.stringify(body))
 }
+const egress = { monthlyCapGb: 800, month: new Date().toISOString().slice(0, 7), bytesServed: 312 * 1024 ** 3 }
 const autoUpdate = { enabled: false, intervalHours: 6, platforms: ['arm64'], running: false, lastRunAt: null, lastCommit: null, lastResult: null }
 /** The server's paged shape: pageSize defaults to 50, clamped to 1..200; page below 1 is 1. */
 const paged = (url, all) => {
@@ -241,6 +242,13 @@ http.createServer(async (req, res) => {
     if (!(intervalHours >= 1)) return problem(res, 400, 'One or more validation errors occurred.')
     Object.assign(autoUpdate, { enabled: !!enabled, intervalHours, platforms: PLATFORMS.filter((x) => platforms?.includes(x)) })
     return send(res, 200, autoUpdate)
+  }
+  if (p === '/api/settings/egress' && req.method === 'GET') return send(res, 200, egress)
+  if (p === '/api/settings/egress' && req.method === 'PUT') {
+    const { monthlyCapGb } = await readJson(req)
+    if (!(Number.isInteger(monthlyCapGb) && monthlyCapGb >= 1 && monthlyCapGb <= 1000000)) return problem(res, 400, 'One or more validation errors occurred.')
+    egress.monthlyCapGb = monthlyCapGb
+    return send(res, 200, egress)
   }
   if (p === '/api/settings/auto-update/run' && req.method === 'POST') {
     Object.assign(autoUpdate, { lastRunAt: new Date().toISOString(), lastCommit: '3f2a9c1d0b7e5a4c3f2a9c1d0b7e5a4c3f2a9c1d', lastResult: {

@@ -236,6 +236,21 @@ public class AutoUpdateSettings
     public string? LastResultJson { get; set; }
 }
 
+/// <summary>The single settings row (<see cref="SingletonId"/>) of the egress cap: package downloads stop for the month at <see cref="MonthlyCapGb"/>.</summary>
+public class EgressSettings
+{
+    public const int SingletonId = 1;
+    public int Id { get; set; }
+    public int MonthlyCapGb { get; set; } = 800;
+}
+
+/// <summary>Bytes served in one UTC month (<see cref="Month"/>, "yyyy-MM"); a new month starts a new row at zero. See <see cref="Services.Egress"/>.</summary>
+public class EgressUsage
+{
+    public string Month { get; set; } = "";
+    public long BytesServed { get; set; }
+}
+
 /// <summary>
 /// The build priority of a port on a platform, computed by <see cref="Services.PriorityComputer"/>; the job claim orders by
 /// <see cref="Priority"/>. One row per (platform, port) with a recipe.
