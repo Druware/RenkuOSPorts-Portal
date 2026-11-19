@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 using Azure.Identity;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Azure.Storage.Blobs;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using RenkuPorts.Server.Data;
@@ -19,9 +21,17 @@ var cfg = builder.Configuration;
 
 // Retries transient Azure SQL errors. No code opens its own transaction, which this execution strategy would reject.
 builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlServer(cfg.GetConnectionString("Sql"), sql => sql.EnableRetryOnFailure()));
-builder.Services.AddIdentity<AppUser, IdentityRole>(o => o.User.RequireUniqueEmail = true)
+builder.Services.AddIdentity<AppUser, IdentityRole>(o =>
+    {
+        o.User.RequireUniqueEmail = true;
+        o.SignIn.RequireConfirmedEmail = true;
+        o.SignIn.RequireConfirmedAccount = true; // with NotDisabledConfirmation: disabled users fail every sign-in route
+    })
     .AddEntityFrameworkStores<AppDbContext>()
     .AddDefaultTokenProviders();
+builder.Services.AddScoped<IUserConfirmation<AppUser>, NotDisabledConfirmation>();
+// A disabled user's (or changed password's) security stamp ends existing cookies within a minute.
+builder.Services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.FromMinutes(1));
 builder.Services.ConfigureApplicationCookie(o =>
 {
     o.Cookie.Name = "renkuports";
@@ -75,6 +85,15 @@ builder.Services.AddSingleton<RepoImporter>();
 builder.Services.AddSingleton<AutoUpdater>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<AutoUpdater>());
 
+// Per client IP (rewritten by UseForwardedHeaders below): "register" is the strictest, "auth" covers the other anonymous auth calls.
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    void PerIp(string policy, int permits, TimeSpan window) => o.AddPolicy(policy, http => RateLimitPartition.GetFixedWindowLimiter(
+        http.Connection.RemoteIpAddress?.ToString() ?? "", _ => new FixedWindowRateLimiterOptions { PermitLimit = permits, Window = window }));
+    PerIp("register", cfg.GetValue("RateLimit:Register:PermitLimit", 5), TimeSpan.FromHours(1));
+    PerIp("auth", cfg.GetValue("RateLimit:Auth:PermitLimit", 10), TimeSpan.FromMinutes(1));
+});
 builder.Services.Configure<FormOptions>(o => o.ValueLengthLimit = 16 << 20);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddProblemDetails();
@@ -103,11 +122,13 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 PublicEndpoints.Map(app);
 AuthEndpoints.Map(app);
 ClientsEndpoints.Map(app);
 AdminEndpoints.Map(app);
+UserAdminEndpoints.Map(app);
 BuildClientApi.Map(app);
 ImportEndpoints.Map(app);
 VersionEndpoints.Map(app);

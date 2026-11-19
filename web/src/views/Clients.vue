@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { api, formatDate, PLATFORMS } from '../api.js'
+import { ref, computed, watch, onMounted } from 'vue'
+import { api, formatDate, isAdmin, PLATFORMS } from '../api.js'
 import HaikuWindow from '../components/HaikuWindow.vue'
 import CopyButton from '../components/CopyButton.vue'
 
@@ -9,13 +9,14 @@ const error = ref('')
 const name = ref('')
 const platform = ref('x86_64')
 const busy = ref(false)
+const showAll = ref(false) // admins only: every user's clients, not just their own
 const created = ref(null) // { id, name, platform, secret } — the secret is only ever shown here, once
 
 const command = computed(() => created.value &&
   `renkuports-client --Server ${location.origin} --ClientId ${created.value.id} --Secret ${created.value.secret} --BuildCommand ${created.value.platform === 'arm64' ? 'client/scripts/build-stack-arm64.sh' : '<your-build-script>'}`)
 
 async function load() {
-  try { clients.value = await api('/clients') } catch (e) { error.value = e.message }
+  try { clients.value = await api(showAll.value ? '/clients?all=true' : '/clients') } catch (e) { error.value = e.message }
 }
 
 async function create() {
@@ -43,6 +44,7 @@ async function remove(c) {
   }
 }
 
+watch(showAll, load)
 onMounted(load)
 </script>
 
@@ -75,21 +77,22 @@ onMounted(load)
   <p v-if="error" class="error" role="alert">{{ error }}</p>
 
   <HaikuWindow title="Build clients">
+    <p v-if="isAdmin()"><label class="check"><input v-model="showAll" type="checkbox" /> Show all users' clients</label></p>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th scope="col">Name</th><th scope="col">Platform</th><th scope="col">Owner</th><th scope="col">Enabled</th>
+            <th scope="col">Name</th><th scope="col">Platform</th><th v-if="showAll" scope="col">Owner</th><th scope="col">Enabled</th>
             <th scope="col">Created</th><th scope="col">Last seen</th><th scope="col"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="c in clients" :key="c.id">
-            <td>{{ c.name }}</td><td>{{ c.platform }}</td><td>{{ c.owner }}</td><td>{{ c.enabled ? 'Yes' : 'No' }}</td>
+            <td>{{ c.name }}</td><td>{{ c.platform }}</td><td v-if="showAll">{{ c.owner }}</td><td>{{ c.enabled ? 'Yes' : 'No' }}</td>
             <td class="nowrap">{{ formatDate(c.createdAt) }}</td><td class="nowrap">{{ formatDate(c.lastSeenAt) }}</td>
             <td><button type="button" class="btn btn-small btn-danger" @click="remove(c)" :aria-label="`Delete ${c.name}`">Delete</button></td>
           </tr>
-          <tr v-if="!clients.length"><td colspan="7" class="muted">No build clients yet.</td></tr>
+          <tr v-if="!clients.length"><td :colspan="showAll ? 7 : 6" class="muted">No build clients yet.</td></tr>
         </tbody>
       </table>
     </div>

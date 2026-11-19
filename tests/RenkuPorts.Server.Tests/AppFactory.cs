@@ -78,6 +78,9 @@ public class AppFactory : WebApplicationFactory<Program>
         b.UseSetting("AutoUpdate:Schedule", "false");
         b.UseSetting("Priorities:Schedule", "false");
         b.UseSetting("Verification:Schedule", "false");
+        // Every test request comes from the same client IP; AccountTests lowers these for the 429 check.
+        b.UseSetting("RateLimit:Register:PermitLimit", "100000");
+        b.UseSetting("RateLimit:Auth:PermitLimit", "100000");
         b.UseWebRoot(_webRoot);
         b.ConfigureServices(s =>
         {
@@ -97,7 +100,7 @@ public class AppFactory : WebApplicationFactory<Program>
         return http;
     }
 
-    /// <summary>Creates a user with only the Builder role, directly through Identity (there is no sign-up endpoint besides OAuth).</summary>
+    /// <summary>Creates a user with only the Builder role, directly through Identity (confirmed, skipping the sign-up email).</summary>
     public async Task<HttpClient> BuilderAsync()
     {
         var email = $"builder-{Guid.NewGuid():N}@renkuos.local";
@@ -105,7 +108,7 @@ public class AppFactory : WebApplicationFactory<Program>
         using (var scope = Services.CreateScope())
         {
             var users = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
-            var u = new AppUser { UserName = email, Email = email, DisplayName = "Builder" };
+            var u = new AppUser { UserName = email, Email = email, EmailConfirmed = true, DisplayName = "Builder" };
             Assert.True((await users.CreateAsync(u, password)).Succeeded);
             await users.AddToRoleAsync(u, "Builder");
         }

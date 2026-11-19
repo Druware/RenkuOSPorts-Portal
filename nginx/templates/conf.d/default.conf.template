@@ -41,8 +41,13 @@ server {
         include /tmp/snippets/proxy-api.conf;
     }
 
-    # Credentials in the body: a sign-in-strength limit (password sign-in, build client secret).
+    # Credentials in the body: a sign-in-strength limit (password sign-in, its 2FA code step, build client secret).
     location = /api/auth/login {
+        limit_req zone=auth_login burst=5 nodelay;
+        include /tmp/snippets/proxy-api.conf;
+    }
+
+    location = /api/auth/login/2fa {
         limit_req zone=auth_login burst=5 nodelay;
         include /tmp/snippets/proxy-api.conf;
     }

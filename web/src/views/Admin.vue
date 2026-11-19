@@ -6,6 +6,7 @@ import JobLog from '../components/JobLog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import CopyButton from '../components/CopyButton.vue'
 import Pager from '../components/Pager.vue'
+import UsersAdmin from '../components/UsersAdmin.vue'
 
 const tab = ref('dashboard')
 const error = ref('')
@@ -324,7 +325,7 @@ watch(tab, (t) => {
 <template>
   <h1 class="page-title">Ports dashboard</h1>
   <div class="tabs" role="group" aria-label="Admin sections">
-    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes'], ['packages', 'Packages'], ['import', 'Import'], ['maintenance', 'Maintenance']]" :key="k" type="button"
+    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes'], ['packages', 'Packages'], ['import', 'Import'], ['users', 'Users'], ['maintenance', 'Maintenance']]" :key="k" type="button"
       class="tab" :aria-pressed="tab === k" @click="tab = k">{{ label }}</button>
   </div>
 
@@ -628,6 +629,8 @@ watch(tab, (t) => {
       </div>
     </HaikuWindow>
   </template>
+
+  <UsersAdmin v-else-if="tab === 'users'" />
 
   <template v-else>
     <HaikuWindow title="Queue builds">

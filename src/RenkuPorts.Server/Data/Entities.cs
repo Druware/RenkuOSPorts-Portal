@@ -6,6 +6,8 @@ namespace RenkuPorts.Server.Data;
 public class AppUser : IdentityUser
 {
     public string DisplayName { get; set; } = "";
+    /// <summary>Set by an admin: no sign-in by any route, and the user's build clients are refused.</summary>
+    public bool Disabled { get; set; }
 }
 
 /// <summary>A machine that builds ports for one platform, authenticating with a client id and secret.</summary>
