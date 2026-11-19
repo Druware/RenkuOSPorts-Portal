@@ -44,15 +44,44 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
     /// <summary>A Running import whose row was not updated for this long was interrupted (its instance stopped).</summary>
     public static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(60);
-    private const int Parallelism = 4;
 
     // Redirects: SocketsHttpHandler follows only http(s) targets and never https -> http.
     private static readonly HttpClient Http = new(new SocketsHttpHandler { MaxAutomaticRedirections = 5 }) { Timeout = Timeout.InfiniteTimeSpan };
 
-    /// <summary>Runs the (already saved, Running) import in the background.</summary>
-    public void Start(long importId) => _ = Task.Run(() => RunAsync(importId, life.ApplicationStopping));
+    /// <summary>How hard an import may press on its source.</summary>
+    /// <param name="Parallelism">Downloads at once.</param>
+    /// <param name="DelayMinSeconds">Shortest random pause before each package download.</param>
+    /// <param name="DelayMaxSeconds">Longest random pause before each package download.</param>
+    /// <param name="MaxKilobytesPerSecond">Limit for all downloads of the import together, in KiB/s; 0 for none.</param>
+    public record Options(int Parallelism, double DelayMinSeconds, double DelayMaxSeconds, int MaxKilobytesPerSecond);
 
-    private async Task RunAsync(long id, CancellationToken stopping)
+    /// <summary>Paces the downloads of one import, shared by its workers, to a byte rate. Never grants credit for idle time.</summary>
+    public sealed class Throttle(int bytesPerSecond)
+    {
+        private readonly Lock _gate = new();
+        private DateTime _next = DateTime.MinValue;
+
+        /// <summary>Waits until <paramref name="bytes"/> more fit within the rate.</summary>
+        public async Task WaitAsync(int bytes, CancellationToken ct)
+        {
+            TimeSpan wait;
+            lock (_gate) wait = Reserve(ref _next, DateTime.UtcNow, bytes, bytesPerSecond);
+            if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+        }
+
+        /// <summary>Books <paramref name="bytes"/> after the last booking (or <paramref name="now"/>, if later), moving <paramref name="next"/>
+        /// to the end of the slot. Returns how long to wait for that end.</summary>
+        public static TimeSpan Reserve(ref DateTime next, DateTime now, int bytes, int bytesPerSecond)
+        {
+            next = (next > now ? next : now) + TimeSpan.FromSeconds((double)bytes / bytesPerSecond);
+            return next - now;
+        }
+    }
+
+    /// <summary>Runs the (already saved, Running) import in the background.</summary>
+    public void Start(long importId, Options options) => _ = Task.Run(() => RunAsync(importId, options, life.ApplicationStopping));
+
+    private async Task RunAsync(long id, Options options, CancellationToken stopping)
     {
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -60,11 +89,14 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
         var work = Directory.CreateTempSubdirectory($"import-{id}-").FullName;
         var skipped = new ConcurrentQueue<SkippedPackage>();
         var imported = 0;
+        var throttle = options.MaxKilobytesPerSecond > 0 ? new Throttle(options.MaxKilobytesPerSecond * 1024) : null;
+        log.LogInformation("Import {Id} from {Url}: {Parallelism} at once, {Min}-{Max} s pause per file, {Rate} KiB/s (0 = no limit)",
+            id, imp.SourceUrl, options.Parallelism, options.DelayMinSeconds, options.DelayMaxSeconds, options.MaxKilobytesPerSecond);
         try
         {
             var baseUrl = imp.SourceUrl.TrimEnd('/');
             var repo = Path.Combine(work, "repo");
-            var repoSha = await DownloadAsync($"{baseUrl}/repo", repo, stopping);
+            var repoSha = await DownloadAsync($"{baseUrl}/repo", repo, throttle, stopping);
             if (await GetOptionalAsync($"{baseUrl}/repo.sha256", stopping) is { } expected && !expected.Trim().StartsWith(repoSha, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException($"The source's repo does not match its repo.sha256 ({repoSha} vs {expected.Trim()}); it may be changing, try again.");
             var listing = RepoListing.Parse(await indexer.Tools.ListVerboseAsync(repo, stopping));
@@ -101,10 +133,15 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
             });
             try
             {
-                await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = Parallelism, CancellationToken = stopping }, async (p, ct) =>
+                await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = options.Parallelism, CancellationToken = stopping }, async (p, ct) =>
                 {
                     if (cancel) return; // stop between files; files already downloading finish
-                    if (await ImportOneAsync(imp, p, baseUrl, work, recipes, ct) is { } reason) skipped.Enqueue(new() { FileName = p.FileName, Reason = reason });
+                    if (options.DelayMaxSeconds > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(options.DelayMinSeconds + Random.Shared.NextDouble() * (options.DelayMaxSeconds - options.DelayMinSeconds)), ct);
+                        if (cancel) return;
+                    }
+                    if (await ImportOneAsync(imp, p, baseUrl, work, recipes, throttle, ct) is { } reason) skipped.Enqueue(new() { FileName = p.FileName, Reason = reason });
                     else Interlocked.Increment(ref imported);
                 });
             }
@@ -140,13 +177,13 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
     }
 
     /// <summary>Downloads, verifies, checks and stores one package. Null on success, else why it was skipped.</summary>
-    private async Task<string?> ImportOneAsync(Import imp, SourcePackage p, string baseUrl, string work, Dictionary<string, DateTime> recipes, CancellationToken ct)
+    private async Task<string?> ImportOneAsync(Import imp, SourcePackage p, string baseUrl, string work, Dictionary<string, DateTime> recipes, Throttle? throttle, CancellationToken ct)
     {
         if (!Validate.IsHpkgName(p.FileName)) return "not a plain .hpkg file name";
         var path = Path.Combine(work, p.FileName);
         try
         {
-            var sha = await DownloadAsync($"{baseUrl}/packages/{Uri.EscapeDataString(p.FileName)}", path, ct);
+            var sha = await DownloadAsync($"{baseUrl}/packages/{Uri.EscapeDataString(p.FileName)}", path, throttle, ct);
             if (p.Checksum is { } c && c != sha) return $"checksum mismatch: the source repository lists {c}, the file is {sha}";
             if (await indexer.Tools.CheckPackageAsync(path, indexer.Vendor, imp.Platform, ct) is { } reason) return reason;
 
@@ -192,8 +229,8 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
     }
 
     /// <summary>Streams a URL to a file, hashing it; at most <see cref="BuildClientApi.MaxUpload"/> bytes, and no more than
-    /// <see cref="StallTimeout"/> without data. Returns the lowercase hex SHA-256.</summary>
-    private static async Task<string> DownloadAsync(string url, string path, CancellationToken ct)
+    /// <see cref="StallTimeout"/> without data (time spent waiting on <paramref name="throttle"/> is not a stall). Returns the lowercase hex SHA-256.</summary>
+    private static async Task<string> DownloadAsync(string url, string path, Throttle? throttle, CancellationToken ct)
     {
         using var stall = CancellationTokenSource.CreateLinkedTokenSource(ct);
         stall.CancelAfter(StallTimeout);
@@ -208,6 +245,11 @@ public sealed class RepoImporter(IServiceScopeFactory scopes, BlobContainerClien
         {
             if (body.BytesRead > BuildClientApi.MaxUpload) throw new IOException($"{url} is larger than 4 GiB");
             await file.WriteAsync(buf.AsMemory(0, n), stall.Token);
+            if (throttle is not null)
+            {
+                stall.CancelAfter(Timeout.InfiniteTimeSpan);
+                await throttle.WaitAsync(n, ct);
+            }
             stall.CancelAfter(StallTimeout);
         }
         return body.Sha256Hex;
