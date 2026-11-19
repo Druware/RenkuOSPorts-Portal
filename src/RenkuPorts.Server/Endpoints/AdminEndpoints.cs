@@ -18,6 +18,8 @@ public static class AdminEndpoints
     public record KeepVersions(int Keep);
     public record FileCleanupRequest(bool Orphans, KeepVersions? Superseded, bool Staged, bool? DryRun);
     public record FileCleanupResult(Tally? Orphans, Tally? Superseded, Tally? Staged, Tally Total);
+    /// <summary>Body of <c>POST /api/admin/reset</c>: a platform or <c>all</c>, and <see cref="Confirm"/> repeating it exactly.</summary>
+    public record ResetRequest(string Platform, string? Confirm);
     public record AutoUpdateDto(bool Enabled, int IntervalHours, string[] Platforms, bool Running, DateTime? LastRunAt, string? LastCommit, AutoUpdateResult? LastResult);
 
     private static async Task<AutoUpdateDto> AutoUpdateAsync(AppDbContext db)
@@ -287,6 +289,38 @@ public static class AdminEndpoints
                 if (!dryRun) log.LogInformation("{User} purged files: superseded {Superseded}, staged {Staged}, orphans {Orphans}; {Bytes} bytes freed",
                     user.Identity?.Name, superseded?.Count, staged?.Count, orphans?.Count, total.Bytes);
                 return Results.Ok(new FileCleanupResult(orphans, superseded, staged, total));
+            }
+            finally { Cleanup.Lock.Release(); }
+        });
+
+        // Danger zone: wipes what was built or imported for one platform, or all ("all"); confirm must repeat platform.
+        g.MapPost("/admin/reset", async (ResetRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs,
+            RepoIndexer indexer, PriorityComputer priorities, ILoggerFactory logs) =>
+        {
+            if (req.Platform != "all" && !Validate.IsPlatform(req.Platform))
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["platform"] = [$"One of: {string.Join(", ", Validate.Platforms)}, all."] });
+            if (req.Confirm != req.Platform)
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["confirm"] = [$"Type {req.Platform} to confirm."] });
+            string[] platforms = req.Platform == "all" ? Validate.Platforms : [req.Platform];
+            var stale = DateTime.UtcNow - RepoImporter.StaleAfter;
+            if (await db.Imports.Where(i => platforms.Contains(i.Platform) && i.Status == ImportStatus.Running && i.UpdatedAt >= stale)
+                    .Select(i => i.Platform).FirstOrDefaultAsync() is { } busy)
+                return Results.Problem(statusCode: 409, title: $"An import for {busy} is running", detail: "Cancel it or wait for it to finish.");
+            if (!Cleanup.Lock.Wait(0)) return Results.Problem(statusCode: 409, title: "A cleanup is already running");
+            try
+            {
+                var log = logs.CreateLogger("AdminEndpoints");
+                var result = new List<Cleanup.ResetTally>();
+                foreach (var p in platforms)
+                {
+                    var t = await Cleanup.ResetAsync(db, blobs, p);
+                    indexer.MarkDirty(p);
+                    result.Add(t);
+                    log.LogWarning("{User} reset {Platform}: {Jobs} jobs, {Builds} builds, {Staged} staged, {Packages} packages, {Imports} imports, {Blobs} blobs ({Bytes} bytes)",
+                        user.Identity?.Name, p, t.Jobs, t.Builds, t.StagedPackages, t.Packages, t.Imports, t.Blobs, t.Bytes);
+                }
+                priorities.MarkDirty();
+                return Results.Ok(result);
             }
             finally { Cleanup.Lock.Release(); }
         });
