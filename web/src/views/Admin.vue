@@ -149,6 +149,13 @@ async function queueTop() {
     ok(created.length ? `Queued ${created.length} job(s) for ${prioPlatform.value}: ${created.map((j) => j.portName).join(', ')}.` : `Nothing outstanding to queue for ${prioPlatform.value}.`)
   } catch (e) { fail(e) } finally { prioBusy.value = false }
 }
+async function togglePin(r) {
+  try {
+    await api(`/priorities/${prioPlatform.value}/${encodeURIComponent(r.portName)}/pin`, { method: r.pinnedAt ? 'DELETE' : 'PUT' })
+    ok(r.pinnedAt ? `${r.portName} (${prioPlatform.value}): unpinned; it builds in computed priority order again.` : `${r.portName} (${prioPlatform.value}): moved to the top of the build order.`)
+    await loadRecipes()
+  } catch (e) { fail(e) }
+}
 onUnmounted(() => clearTimeout(prioPoll))
 
 // ---- Automatic updates (queue changed ports on a schedule) ----
@@ -705,7 +712,7 @@ watch(tab, (t) => {
     </HaikuWindow>
 
     <HaikuWindow title="Build priority">
-      <p class="muted small">A port's priority is the number of outstanding ports (stable on the platform, nothing published there yet) that need it built first, directly or through other outstanding ports. Builds are claimed highest priority first, then oldest. Priorities are recomputed after a recipe sync and a few minutes after packages are published or deleted.</p>
+      <p class="muted small">A port's priority is the number of outstanding ports (stable on the platform, nothing published there yet) that need it built first, directly or through other outstanding ports. Builds are claimed pinned ports first (Move to top in the recipe list, newest pin first), then highest priority, then oldest. Priorities are recomputed after a recipe sync and a few minutes after packages are published or deleted.</p>
       <div class="toolbar">
         <label for="bp-platform">Platform</label>
         <select id="bp-platform" v-model="prioPlatform">
@@ -743,7 +750,10 @@ watch(tab, (t) => {
               <td><input type="radio" name="recipe" :id="`rc-${r.id}`" :checked="selected?.id === r.id" @change="selected = r" /></td>
               <td><label :for="`rc-${r.id}`">{{ r.portName }}</label></td>
               <td>{{ r.version }}</td><td>{{ r.category }}</td><td class="nowrap">{{ formatDate(r.recipeUpdatedAt) }}</td>
-              <td class="num" :class="{ muted: r.outstanding === false }" :title="r.outstanding === false ? 'Not outstanding: published already, or not stable on this platform' : ''">{{ r.priority ?? '—' }}</td>
+              <td class="num nowrap" :class="{ muted: r.outstanding === false }" :title="r.outstanding === false ? 'Not outstanding: published already, or not stable on this platform' : ''">
+                <span v-if="r.pinnedAt" :title="`Pinned ${formatDate(r.pinnedAt)}`">Pinned · </span>{{ r.priority ?? '—' }}
+                <button v-if="r.priority != null" type="button" class="btn btn-small" :aria-label="r.pinnedAt ? `Unpin ${r.portName} on ${prioPlatform}` : `Move ${r.portName} to the top of the build order on ${prioPlatform}`" @click="togglePin(r)">{{ r.pinnedAt ? 'Unpin' : 'Move to top' }}</button>
+              </td>
               <td class="num">{{ r.dependents ?? '—' }}</td>
               <td><button v-if="r.embedsDates" type="button" class="btn btn-small" :aria-label="`Clear the embeds-dates flag of ${r.portName}`" title="Timestamp-only differences of this port are approved automatically" @click="clearEmbedsDates(r)">Yes · Clear</button></td>
             </tr>

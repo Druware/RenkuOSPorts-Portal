@@ -269,6 +269,8 @@ public class PortPriority
     /// <summary>Outstanding ports that need this port directly.</summary>
     public int Dependents { get; set; }
     public DateTime ComputedAt { get; set; }
+    /// <summary>Set by an admin to build the port before all computed priorities, newest pin first; kept across recomputes.</summary>
+    public DateTime? PinnedAt { get; set; }
 }
 
 /// <summary>

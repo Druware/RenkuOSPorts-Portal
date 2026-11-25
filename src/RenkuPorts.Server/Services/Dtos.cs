@@ -56,9 +56,10 @@ public record PortsRepoDto(string Url, string Branch);
 public record ClientSelfDto(Guid Id, string Name, string Platform, string Owner, ClientJobDto? CurrentJob, List<OwnerClientDto> OwnerClients, PortsRepoDto? PortsRepo);
 
 /// <summary>A recipe;<see cref="Priority"/>, <see cref="Dependents"/> and <see cref="Outstanding"/> are its port's <see cref="Data.PortPriority"/>
-/// on the platform the list was asked for, null without one or before the port's priority is computed.</summary>
+/// on the platform the list was asked for, null without one or before the port's priority is computed; so is <see cref="PinnedAt"/>,
+/// set while an admin has the port pinned to the top there.</summary>
 public record RecipeDto(int Id, string PortName, string Category, string Version, string RecipePath, DateTime RecipeUpdatedAt,
-    int? Priority = null, int? Dependents = null, bool? Outstanding = null, bool EmbedsDates = false);
+    int? Priority = null, int? Dependents = null, bool? Outstanding = null, bool EmbedsDates = false, DateTime? PinnedAt = null);
 
 /// <summary>
 /// A published package. <see cref="Verification"/>: <c>verified</c> (matching builds of <see cref="VerifiedClients"/> different

@@ -10,11 +10,14 @@ namespace RenkuPorts.Server.Endpoints;
 public static partial class BuildClientApi
 {
     /// <summary>
-    /// The order build clients claim Queued jobs in, as a SQL ORDER BY over the Jobs table: highest build priority of the job's
-    /// port on its platform first (no PortPriorities row counts as 0), then oldest, then lowest id. The claim statement and
-    /// <see cref="QueueSlotsSql"/> both use it, so the queue position shown is the order the claim takes.
+    /// The order build clients claim Queued jobs in, as a SQL ORDER BY over the Jobs table: ports an admin pinned on the job's
+    /// platform first (newest pin first), then highest build priority of the job's port there (no PortPriorities row counts as 0),
+    /// then oldest, then lowest id. The claim statement and <see cref="QueueSlotsSql"/> both use it, so the queue position shown
+    /// is the order the claim takes.
     /// </summary>
     public const string ClaimOrder = """
+        (SELECT MAX(pp.PinnedAt) FROM PortPriorities pp JOIN Recipes r ON r.PortName = pp.PortName
+         WHERE r.Id = Jobs.RecipeId AND pp.Platform = Jobs.Platform) DESC,
         (SELECT ISNULL(MAX(pp.Priority), 0) FROM PortPriorities pp JOIN Recipes r ON r.PortName = pp.PortName
          WHERE r.Id = Jobs.RecipeId AND pp.Platform = Jobs.Platform) DESC, Jobs.QueuedAt, Jobs.Id
         """;
