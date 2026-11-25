@@ -465,7 +465,7 @@ watch(tab, (t) => {
                   <li v-for="f in d.files" :key="f.package + f.path">
                     <code>{{ f.package }}{{ f.path ? ` : ${f.path}` : '' }}</code> {{ f.sizeA ?? '—' }} / {{ f.sizeB ?? '—' }} bytes
                     <span v-if="f.note"> · {{ f.note }}</span><span v-else> · {{ f.runCount }} differing run(s){{ f.timestampLike ? ', timestamp-like' : '' }}</span>
-                    <div v-for="run in f.runs" :key="run.offset" class="diff-runs">@{{ run.offset }}: <span>{{ run.a }}</span> → <span>{{ run.b }}</span></div>
+                    <div v-for="(run, i) in f.runs" :key="i" class="diff-runs">{{ f.path === '.package-info' ? `line ${run.offset}` : `@${run.offset}` }}: <span>{{ run.a }}</span> → <span>{{ run.b }}</span></div>
                   </li>
                   <li v-if="d.fileCount > d.files.length" class="muted">{{ d.fileCount - d.files.length }} more not shown</li>
                 </ul>

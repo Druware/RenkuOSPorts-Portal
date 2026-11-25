@@ -131,6 +131,23 @@ public class PackageDigestTests
     }
 
     [Fact]
+    public async Task Metadata_differences_are_shown_line_by_line()
+    {
+        var entries = PackageDigest.ParseContents(ListA)!;
+        var info = ListA.Split("bin ")[0];
+        var la = new PackageListing(PackageDigest.Metadata(info), entries, false);
+        var lb = new PackageListing(PackageDigest.Metadata(info.Replace("0.8.3-1", "0.8.3-2") + "\trequires: lib:libgcc_s\n"), entries, false);
+        const string pkg = "xxhash-0.8.3-1-arm64.hpkg";
+        var diff = await PackageDigest.CompareAsync(1, new Dictionary<string, PackageListing> { [pkg] = la }, new Dictionary<string, PackageListing> { [pkg] = lb },
+            _ => throw new InvalidOperationException("no file bytes differ"), _ => throw new InvalidOperationException("no file bytes differ"), default);
+        var f = Assert.Single(diff.Files);
+        Assert.Equal((".package-info", "metadata lines differ", 2), (f.Path, f.Note, f.RunCount));
+        Assert.Equal([new ByteRun(3, "version: 0.8.3-1", "version: 0.8.3-2"), new ByteRun(5, "", "requires: lib:libgcc_s")], f.Runs);
+        Assert.False(f.TimestampLike);
+        Assert.False(diff.TimestampLike);
+    }
+
+    [Fact]
     public void Metadata_drops_the_packager_which_names_the_building_client()
     {
         var info = ListA.Split("bin ")[0];

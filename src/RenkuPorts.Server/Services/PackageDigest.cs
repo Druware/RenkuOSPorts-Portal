@@ -175,12 +175,7 @@ public static partial class PackageDigest
                 files.Add(new(pkg, "", null, null, $"package only in build {(la is null ? "this" : against.ToString())}", 0, [], false));
                 continue;
             }
-            if (la.Metadata != lb.Metadata)
-            {
-                using var ma = new MemoryStream(Encoding.UTF8.GetBytes(la.Metadata));
-                using var mb = new MemoryStream(Encoding.UTF8.GetBytes(lb.Metadata));
-                files.Add(await CompareBytesAsync(pkg, ".package-info", ma, mb, ct));
-            }
+            if (la.Metadata != lb.Metadata) files.Add(CompareMetadata(pkg, la.Metadata, lb.Metadata));
             var ea = la.Entries.ToDictionary(e => e.Path);
             var eb = lb.Entries.ToDictionary(e => e.Path);
             foreach (var path in ea.Keys.Union(eb.Keys).Order(StringComparer.Ordinal))
@@ -203,6 +198,35 @@ public static partial class PackageDigest
             }
         }
         return new(against, files.Count > 0 && files.All(f => f.TimestampLike), files.Count, files.Take(MaxFiles).ToList());
+    }
+
+    /// <summary>
+    /// How two packages' metadata differ, line by line (path <c>.package-info</c>). Lines of <paramref name="a"/> that
+    /// <paramref name="b"/> lacks (counted as a multiset) are paired by position with lines of <paramref name="b"/> that
+    /// <paramref name="a"/> lacks; an unpaired side is empty. A run's offset is the 1-based line number in <paramref name="a"/>,
+    /// or in <paramref name="b"/> for an added line with no partner. Never timestamp-like: <see cref="Metadata"/> drops dates.
+    /// </summary>
+    public static FileDiff CompareMetadata(string pkg, string a, string b)
+    {
+        string[] la = a.Split('\n'), lb = b.Split('\n');
+        var removed = Unmatched(la, lb);
+        var added = Unmatched(lb, la);
+        var count = Math.Max(removed.Count, added.Count);
+        var runs = Enumerable.Range(0, Math.Min(count, ShownRuns)).Select(i => i < removed.Count
+            ? new ByteRun(removed[i].Line, removed[i].Text, i < added.Count ? added[i].Text : "")
+            : new ByteRun(added[i].Line, "", added[i].Text)).ToList();
+        return new(pkg, ".package-info", Encoding.UTF8.GetByteCount(a), Encoding.UTF8.GetByteCount(b), "metadata lines differ", count, runs, false);
+    }
+
+    /// <summary>The lines of <paramref name="x"/> (with 1-based line numbers, in order) that <paramref name="y"/> lacks, counting repeats.</summary>
+    private static List<(int Line, string Text)> Unmatched(string[] x, string[] y)
+    {
+        var left = y.CountBy(l => l).ToDictionary();
+        var result = new List<(int, string)>();
+        for (var i = 0; i < x.Length; i++)
+            if (left.GetValueOrDefault(x[i]) > 0) left[x[i]]--;
+            else result.Add((i + 1, x[i]));
+        return result;
     }
 
     /// <summary>
