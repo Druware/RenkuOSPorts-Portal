@@ -39,6 +39,25 @@ public static class AdminEndpoints
         return new(cap, month, await db.EgressUsage.Where(u => u.Month == month).Select(u => u.BytesServed).SingleOrDefaultAsync());
     }
 
+    /// <summary>409 for a platform with no <see cref="PortPriority"/> rows: that means "not computed", not "nothing outstanding"
+    /// (existing rows stay usable during a recompute).</summary>
+    private static IResult NotCalculated(string platform, PriorityComputer priorities) =>
+        Results.Problem(statusCode: 409, title: "Build priorities not calculated yet", detail: priorities.Running
+            ? $"Build priorities for {platform} are being calculated now; try again in a few minutes."
+            : $"Build priorities for {platform} have not been calculated; sync recipes (or recompute priorities) first.");
+
+    /// <summary>Sets <see cref="PortPriority.PinnedAt"/> of <paramref name="portName"/> on <paramref name="platform"/> to
+    /// <paramref name="pinnedAt"/> (null unpins). 204; 404 for an unknown platform or port, 409 before priorities are computed.</summary>
+    private static async Task<IResult> PinAsync(string platform, string portName, DateTime? pinnedAt, ClaimsPrincipal user, AppDbContext db,
+        PriorityComputer priorities, ILoggerFactory logs)
+    {
+        if (!Validate.IsPlatform(platform)) return Results.NotFound();
+        if (await db.PortPriorities.Where(p => p.Platform == platform && p.PortName == portName).ExecuteUpdateAsync(s => s.SetProperty(p => p.PinnedAt, pinnedAt)) == 0)
+            return await db.PortPriorities.AnyAsync(p => p.Platform == platform) ? Results.NotFound() : NotCalculated(platform, priorities);
+        logs.CreateLogger("AdminEndpoints").LogInformation("{User} {Action} {Port} on {Platform}", user.Identity?.Name, pinnedAt is null ? "unpinned" : "pinned", portName, platform);
+        return Results.NoContent();
+    }
+
     public static void Map(WebApplication app)
     {
         var g = app.MapGroup("/api").RequireAuthorization("Admin");
@@ -65,7 +84,8 @@ public static class AdminEndpoints
             }
         });
 
-        // With a platform each recipe carries its port's priority there; sort=priority (needs a platform) puts the highest first.
+        // With a platform each recipe carries its port's priority there; sort=priority (needs a platform) puts pinned ports (newest
+        // pin first), then the highest priority first.
         g.MapGet("/recipes", async (string? search, string? platform, string? sort, int? page, int? pageSize, AppDbContext db) =>
         {
             if (platform is not null && !Validate.IsPlatform(platform))
@@ -78,11 +98,11 @@ public static class AdminEndpoints
                     join pp in db.PortPriorities.Where(p => p.Platform == platform) on r.PortName equals pp.PortName into g
                     from pp in g.DefaultIfEmpty()
                     select new { r, pp };
-            return Results.Ok(await Paged<RecipeDto>.FromAsync(q, o => (sort == "priority" ? o.OrderByDescending(x => x.pp == null ? 0 : x.pp.Priority).ThenBy(x => x.r.PortName) : o.OrderBy(x => x.r.PortName))
+            return Results.Ok(await Paged<RecipeDto>.FromAsync(q, o => (sort == "priority" ? o.OrderByDescending(x => x.pp == null ? null : x.pp.PinnedAt).ThenByDescending(x => x.pp == null ? 0 : x.pp.Priority).ThenBy(x => x.r.PortName) : o.OrderBy(x => x.r.PortName))
                     .ThenByDescending(x => x.r.Version).ThenBy(x => x.r.Id),
                 x => new RecipeDto(x.r.Id, x.r.PortName, x.r.Category, x.r.Version, x.r.RecipePath, x.r.RecipeUpdatedAt,
                     x.pp == null ? null : x.pp.Priority, x.pp == null ? null : x.pp.Dependents, x.pp == null ? null : x.pp.Outstanding,
-                    db.DateEmbeddingPorts.Any(d => d.PortName == x.r.PortName)), page, pageSize));
+                    db.DateEmbeddingPorts.Any(d => d.PortName == x.r.PortName), x.pp == null ? null : x.pp.PinnedAt), page, pageSize));
         });
 
         // Clears a port's "embeds dates" flag (set by an admin override): its timestamp-only mismatches need an admin again.
@@ -117,20 +137,22 @@ public static class AdminEndpoints
             if (!Validate.IsPlatform(platform)) return Results.NotFound();
             var count = req?.Count ?? 20;
             if (count is < 1 or > 200) return Results.ValidationProblem(new Dictionary<string, string[]> { ["count"] = ["From 1 to 200."] });
-            // No rows yet means "not computed", not "nothing outstanding"; existing rows stay usable during a recompute.
-            if (!await db.PortPriorities.AnyAsync(p => p.Platform == platform))
-                return Results.Problem(statusCode: 409, title: "Build priorities not calculated yet", detail: priorities.Running
-                    ? $"Build priorities for {platform} are being calculated now; try again in a few minutes."
-                    : $"Build priorities for {platform} have not been calculated; sync recipes (or recompute priorities) first.");
+            if (!await db.PortPriorities.AnyAsync(p => p.Platform == platform)) return NotCalculated(platform, priorities);
             var top = await db.PortPriorities.Include(p => p.Recipe)
                 .Where(p => p.Platform == platform && p.Outstanding
                     && !PublicEndpoints.Published(db).Any(k => k.Platform == platform && k.PortName == p.PortName)
                     && !db.Jobs.Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName && JobStatuses.Active.Contains(j.Status)))
-                .OrderByDescending(p => p.Priority).ThenBy(p => p.PortName).Take(count).ToListAsync();
+                .OrderByDescending(p => p.PinnedAt).ThenByDescending(p => p.Priority).ThenBy(p => p.PortName).Take(count).ToListAsync();
             var ids = new List<long>();
             foreach (var p in top) ids.AddRange((await QueueAsync(db, p.Recipe!, [platform], users.GetUserId(user)!)).Select(j => j.Id));
             return Results.Ok(await db.Jobs.Where(j => ids.Contains(j.Id)).OrderBy(j => j.Id).Select(Project.Job).ToListAsync());
         });
+
+        // Pins a port to the top of the platform's build order (again, if pinned already: the newest pin comes first), or unpins it.
+        g.MapPut("/priorities/{platform}/{portName}/pin", (string platform, string portName, ClaimsPrincipal user, AppDbContext db, PriorityComputer priorities, ILoggerFactory logs) =>
+            PinAsync(platform, portName, DateTime.UtcNow, user, db, priorities, logs));
+        g.MapDelete("/priorities/{platform}/{portName}/pin", (string platform, string portName, ClaimsPrincipal user, AppDbContext db, PriorityComputer priorities, ILoggerFactory logs) =>
+            PinAsync(platform, portName, null, user, db, priorities, logs));
 
         g.MapPost("/jobs", async (QueueRequest req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db) =>
         {

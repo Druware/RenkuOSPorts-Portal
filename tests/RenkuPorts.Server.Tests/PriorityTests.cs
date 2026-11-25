@@ -12,7 +12,7 @@ namespace RenkuPorts.Server.Tests;
 /// <summary>Build priorities: the dependency graph, recipe evaluation, the claim order and the admin endpoints.</summary>
 public partial class ApiTests
 {
-    private record PrioRecipeView(int Id, string PortName, string Version, int? Priority, int? Dependents, bool? Outstanding);
+    private record PrioRecipeView(int Id, string PortName, string Version, int? Priority, int? Dependents, bool? Outstanding, DateTime? PinnedAt = null);
 
     private static EvaluatedRecipe R(string port, string version, string archs, string? provides = null, string? build = null, string? requires = null, Dictionary<string, string>? more = null)
     {
@@ -179,8 +179,50 @@ public partial class ApiTests
         Assert.Equal(HttpStatusCode.Forbidden, (await builder.PostAsync("/api/priorities/recompute", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await builder.PostAsJsonAsync("/api/priorities/arm64/queue-top", new { count = 1 })).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await builder.GetAsync("/api/recipes?platform=arm64&sort=priority")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await builder.PutAsync("/api/priorities/arm64/zlib/pin", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await builder.DeleteAsync("/api/priorities/arm64/zlib/pin")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await app.CreateClient().GetAsync("/api/priorities")).StatusCode);
         Assert.Equal(HttpStatusCode.Accepted, (await (await app.SignedInAsync()).PostAsync("/api/priorities/recompute", null)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Pinned_ports_come_first_newest_pin_first_and_stay_pinned_across_a_recompute()
+    {
+        var admin = await app.SignedInAsync();
+        var (_, client) = await app.BuildClientAsync(admin);
+        var zlib = await QueueAsync(admin, "zlib");
+        var exr = await QueueAsync(admin, "openexr30");
+        var foo = await QueueAsync(admin, "foo");
+        await SetPriorityAsync("openexr30", 9);
+        await SetPriorityAsync("foo", 5);
+        await SetPriorityAsync("zlib", 1);
+        async Task<List<long>> Order() => (await ClientJobsAsync(client, "?status=Queued")).Items.OrderBy(j => j.QueuePosition).Select(j => j.Id).ToList();
+        Task<HttpResponseMessage> Pin(string port, string platform = "arm64") => admin.PutAsync($"/api/priorities/{platform}/{port}/pin", null);
+        Assert.Equal([exr.Id, foo.Id, zlib.Id], await Order());
+
+        Assert.Equal(HttpStatusCode.NoContent, (await Pin("zlib")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await Pin("foo")).StatusCode);
+        Assert.Equal([foo.Id, zlib.Id, exr.Id], await Order());
+        Assert.Equal(HttpStatusCode.NoContent, (await Pin("zlib")).StatusCode); // pinning again moves it to the top
+        Assert.Equal([zlib.Id, foo.Id, exr.Id], await Order());
+        var recipes = (await admin.GetFromJsonAsync<PageView<PrioRecipeView>>("/api/recipes?platform=arm64&sort=priority"))!.Items;
+        Assert.Equal(["zlib", "foo", "openexr30"], recipes.Select(r => r.PortName).Distinct().Take(3));
+        Assert.NotNull(recipes[0].PinnedAt);
+        Assert.Null(recipes.First(r => r.PortName == "openexr30").PinnedAt);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync("/api/priorities/arm64/foo/pin")).StatusCode);
+        Assert.Equal([zlib.Id, exr.Id, foo.Id], await Order());
+
+        Assert.Equal(HttpStatusCode.NotFound, (await Pin("nosuchport")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.DeleteAsync("/api/priorities/arm64/nosuchport/pin")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Pin("zlib", "m68k")).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await Pin("zlib", "x86")).StatusCode); // no priorities computed there
+
+        // A recompute rewrites zlib's row but keeps the pin.
+        Assert.True(await app.Services.GetRequiredService<PriorityComputer>().ComputeAsync(default));
+        Assert.NotNull((await admin.GetFromJsonAsync<PageView<PrioRecipeView>>("/api/recipes?platform=arm64&search=zlib"))!.Items[0].PinnedAt);
+        Assert.Equal(zlib.Id, (await Order())[0]);
+        Assert.Equal("zlib", (await ClaimAsync(client)).PortName);
     }
 
     [Fact]

@@ -701,6 +701,9 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.Property<bool>("Outstanding")
                         .HasColumnType("bit");
 
+                    b.Property<DateTime?>("PinnedAt")
+                        .HasColumnType("datetime2");
+
                     b.Property<int>("Priority")
                         .HasColumnType("int");
 

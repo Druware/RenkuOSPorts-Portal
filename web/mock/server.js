@@ -265,6 +265,7 @@ http.createServer(async (req, res) => {
   if (p === '/api/priorities') return send(res, 200, { running: false, lastError: null, platforms: PLATFORMS.map((pl) => ({ platform: pl, computedAt: ago(30), outstanding: 12 })) })
   if (p === '/api/priorities/recompute' && req.method === 'POST') return send(res, 202, null)
   if (/^\/api\/priorities\/[^/]+\/queue-top$/.test(p) && req.method === 'POST') return send(res, 200, [])
+  if (/^\/api\/priorities\/[^/]+\/[^/]+\/pin$/.test(p) && (req.method === 'PUT' || req.method === 'DELETE')) return send(res, 204)
   if (p === '/api/jobs' && req.method === 'GET') {
     const st = url.searchParams.get('status'), pl = url.searchParams.get('platform')
     return send(res, 200, paged(url, jobs.filter((j) => (!st || j.status === st) && (!pl || j.platform === pl)).sort((a, b) => b.id - a.id)))
