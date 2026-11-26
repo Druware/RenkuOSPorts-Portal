@@ -318,3 +318,24 @@ public class PortDependency
     public string PortName { get; set; } = "";
     public string DependsOn { get; set; } = "";
 }
+
+/// <summary>
+/// A personal API token for an admin (<see cref="Endpoints.ApiTokenHandler"/>): <c>rpat_</c> plus 256 random bits, shown once. It acts
+/// as its user only within <see cref="Scope"/> (only <c>issues</c>: the build-issue endpoints) and only while the user may sign in and is an admin.
+/// </summary>
+public class ApiToken
+{
+    public long Id { get; set; }
+    public string UserId { get; set; } = "";
+    public string Name { get; set; } = "";
+    /// <summary>SHA-256 (hex) of the whole token; the token itself is never stored.</summary>
+    public string Hash { get; set; } = "";
+    /// <summary>The first characters after <c>rpat_</c>, to tell tokens apart in the UI.</summary>
+    public string Prefix { get; set; } = "";
+    public string Scope { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
+    public DateTime ExpiresAt { get; set; }
+    /// <summary>Updated at most every few minutes, not on every request.</summary>
+    public DateTime? LastUsedAt { get; set; }
+    public DateTime? RevokedAt { get; set; }
+}

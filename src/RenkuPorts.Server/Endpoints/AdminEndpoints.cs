@@ -65,6 +65,8 @@ public static class AdminEndpoints
     public static void Map(WebApplication app)
     {
         var g = app.MapGroup("/api").RequireAuthorization("Admin");
+        // What an admin's issues-scoped API token may also call (ApiTokenEndpoints): the build issues and job logs.
+        var issues = app.MapGroup("/api").RequireAuthorization("IssueWorker");
 
         g.MapPost("/recipes/sync", async (AppDbContext db, IConfiguration cfg, ILoggerFactory logs, PriorityComputer priorities) =>
         {
@@ -186,7 +188,7 @@ public static class AdminEndpoints
             return await Paged<JobDto>.FromAsync(q, o => o.OrderByDescending(j => j.Id), Project.Job, page, pageSize);
         });
 
-        g.MapGet("/jobs/{id:long}/log", async (long id, AppDbContext db, BlobContainerClient blobs) =>
+        issues.MapGet("/jobs/{id:long}/log", async (long id, AppDbContext db, BlobContainerClient blobs) =>
         {
             var job = await db.Jobs.FindAsync(id);
             if (job is null || !job.HasLog) return Results.NotFound();
@@ -393,7 +395,7 @@ public static class AdminEndpoints
         });
 
         // Build issues (Services/BuildIssues.cs). status: open, escalated, resolved or all; without it, the open and escalated ones.
-        g.MapGet("/issues", async (string? status, AppDbContext db) =>
+        issues.MapGet("/issues", async (string? status, AppDbContext db) =>
         {
             if (status is not (null or "open" or "escalated" or "resolved" or "all"))
                 return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = ["open, escalated, resolved or all."] });
@@ -408,18 +410,18 @@ public static class AdminEndpoints
             return Results.Ok(await IssueDtosAsync(db, q.OrderByDescending(i => i.LastSeenAt).ThenByDescending(i => i.Id).Take(500)));
         });
 
-        g.MapGet("/issues/{id:long}", async (long id, AppDbContext db) =>
+        issues.MapGet("/issues/{id:long}", async (long id, AppDbContext db) =>
             (await IssueDtosAsync(db, db.BuildIssues.Where(i => i.Id == id))).FirstOrDefault() is { } issue ? Results.Ok(issue) : Results.NotFound());
 
         // Resolving unblocks the issue's ports; requeue also requeues its failed jobs (as /jobs/{id}/requeue does), which leave the issue.
-        g.MapPost("/issues/{id:long}/resolve", async (long id, ResolveIssueRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs,
+        issues.MapPost("/issues/{id:long}/resolve", async (long id, ResolveIssueRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs,
             TimeProvider time, ILoggerFactory logs) =>
         {
             var issue = await db.BuildIssues.FindAsync(id);
             if (issue is null) return Results.NotFound();
             if (issue.Status == BuildIssueStatus.Resolved) return Results.Problem(statusCode: 409, title: "Issue is Resolved", detail: "It was resolved already.");
             if (InvalidNote(req.Note) is { } invalid) return invalid;
-            var by = user.Identity?.Name ?? "admin";
+            var by = ApiTokenEndpoints.By(user);
             var now = time.GetUtcNow().UtcDateTime;
             (issue.Status, issue.ResolvedBy, issue.ResolvedAt) = (BuildIssueStatus.Resolved, by, now);
             AppendNote(issue, now, by, "resolved", req.Note!.Trim());
@@ -432,14 +434,14 @@ public static class AdminEndpoints
             return Results.Ok(new { Issue = (await IssueDtosAsync(db, db.BuildIssues.Where(i => i.Id == id))).Single(), Requeued = requeued });
         });
 
-        g.MapPost("/issues/{id:long}/escalate", async (long id, EscalateIssueRequest req, ClaimsPrincipal user, AppDbContext db, TimeProvider time,
+        issues.MapPost("/issues/{id:long}/escalate", async (long id, EscalateIssueRequest req, ClaimsPrincipal user, AppDbContext db, TimeProvider time,
             UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs) =>
         {
             var issue = await db.BuildIssues.FindAsync(id);
             if (issue is null) return Results.NotFound();
             if (issue.Status != BuildIssueStatus.Open) return Results.Problem(statusCode: 409, title: $"Issue is {issue.Status}", detail: "Only an open issue can be escalated.");
             if (InvalidNote(req.Note) is { } invalid) return invalid;
-            var by = user.Identity?.Name ?? "admin";
+            var by = ApiTokenEndpoints.By(user);
             var note = req.Note!.Trim();
             issue.Status = BuildIssueStatus.Escalated;
             AppendNote(issue, time.GetUtcNow().UtcDateTime, by, "escalated", note);

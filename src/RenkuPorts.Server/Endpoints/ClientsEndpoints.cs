@@ -63,5 +63,5 @@ public static class ClientsEndpoints
     /// <summary>SHA-256 hex of a client secret. A plain hash is enough: secrets are 256 random bits, not passwords.</summary>
     public static string HashSecret(string secret) => Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secret)));
 
-    private static string Base64UrlEncode(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    internal static string Base64UrlEncode(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
