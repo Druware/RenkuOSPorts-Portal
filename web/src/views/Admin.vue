@@ -7,6 +7,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import CopyButton from '../components/CopyButton.vue'
 import Pager from '../components/Pager.vue'
 import UsersAdmin from '../components/UsersAdmin.vue'
+import IssuesAdmin from '../components/IssuesAdmin.vue'
 
 const tab = ref('dashboard')
 const error = ref('')
@@ -204,13 +205,17 @@ async function sync() {
   } catch (e) { fail(e) } finally { syncing.value = false }
 }
 
-async function queue() {
+async function queue(force = false) {
   const r = selected.value
   try {
-    const created = await api('/jobs', { method: 'POST', body: { portName: r.portName, version: r.version, platforms: targets.value } })
+    const created = await api('/jobs', { method: 'POST', body: { portName: r.portName, version: r.version, platforms: targets.value, force } })
     ok(`Queued ${created.length} job(s) for ${r.portName}-${r.version}` +
       (created.length < targets.value.length ? ' (platforms with a pending job were skipped).' : '.'))
-  } catch (e) { fail(e) }
+  } catch (e) {
+    // 409 when a build issue blocks the port: the admin may queue it anyway.
+    if (e.status === 409 && !force && confirm(`${e.message}\n\nQueue anyway?`)) return queue(true)
+    fail(e)
+  }
 }
 
 async function reindex(platform) {
@@ -344,7 +349,7 @@ watch(tab, (t) => {
 <template>
   <h1 class="page-title">Ports dashboard</h1>
   <div class="tabs" role="group" aria-label="Admin sections">
-    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['recipes', 'Recipes'], ['packages', 'Packages'], ['import', 'Import'], ['users', 'Users'], ['maintenance', 'Maintenance']]" :key="k" type="button"
+    <button v-for="[k, label] in [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['issues', 'Issues'], ['recipes', 'Recipes'], ['packages', 'Packages'], ['import', 'Import'], ['users', 'Users'], ['maintenance', 'Maintenance']]" :key="k" type="button"
       class="tab" :aria-pressed="tab === k" @click="tab = k">{{ label }}</button>
   </div>
 
@@ -650,10 +655,11 @@ watch(tab, (t) => {
   </template>
 
   <UsersAdmin v-else-if="tab === 'users'" />
+  <IssuesAdmin v-else-if="tab === 'issues'" />
 
   <template v-else>
     <HaikuWindow title="Queue builds">
-      <form class="form" @submit.prevent="queue">
+      <form class="form" @submit.prevent="queue()">
         <p>{{ selected ? `${selected.category}/${selected.portName}-${selected.version}` : 'Select a recipe below.' }}</p>
         <fieldset>
           <legend>Platforms</legend>

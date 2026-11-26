@@ -71,6 +71,9 @@ public class Job
     public int Attempts { get; set; }
     public string? FailureSummary { get; set; }
     public bool HasLog { get; set; }
+    /// <summary>The build issue this job's failure was filed under; while that issue is not Resolved the port is not queued again on the platform.</summary>
+    public long? IssueId { get; set; }
+    public BuildIssue? Issue { get; set; }
     /// <summary>Published packages: the approved build's, created when the job succeeds.</summary>
     public List<Package> Packages { get; set; } = [];
     public List<JobBuild> Builds { get; set; } = [];
@@ -86,6 +89,38 @@ public class Job
     /// <summary>Concurrency token: admin transitions fail with 409 if a client claimed or finished the job meanwhile.</summary>
     [System.ComponentModel.DataAnnotations.Timestamp]
     public byte[] RowVersion { get; set; } = [];
+}
+
+/// <summary>Recipe: the build itself failed; Dependency: a dependency could not be resolved or built; Environment: the client's build environment failed. Stored as text.</summary>
+public enum BuildIssueKind { Recipe, Dependency, Environment }
+
+/// <summary>Open: new; Escalated: an admin flagged it for attention (emailed); Resolved: fixed, the port may be queued again. Stored as text.</summary>
+public enum BuildIssueStatus { Open, Escalated, Resolved }
+
+/// <summary>
+/// One kind of build failure on one platform: failures whose summaries normalise to the same <see cref="Signature"/>
+/// (<see cref="Services.BuildIssues.Signature"/>) are counted under one issue until it is Resolved. A port with a failed job under a
+/// non-Resolved issue is not queued again on the platform (<see cref="Services.BuildIssues.Blocking"/>).
+/// </summary>
+public class BuildIssue
+{
+    public long Id { get; set; }
+    public string Platform { get; set; } = "";
+    public string Signature { get; set; } = "";
+    public BuildIssueKind Kind { get; set; }
+    public BuildIssueStatus Status { get; set; }
+    /// <summary>The raw summary of the first failure, truncated.</summary>
+    public string Title { get; set; } = "";
+    /// <summary>Failures filed under the issue.</summary>
+    public int Count { get; set; }
+    public DateTime FirstSeenAt { get; set; }
+    public DateTime LastSeenAt { get; set; }
+    /// <summary>The job of the first failure. A plain id, no foreign key: a platform reset deletes jobs before issues.</summary>
+    public long? ExampleJobId { get; set; }
+    /// <summary>Admin notes from escalating and resolving, one per line.</summary>
+    public string? Notes { get; set; }
+    public string? ResolvedBy { get; set; }
+    public DateTime? ResolvedAt { get; set; }
 }
 
 public enum JobBuildStatus { InProgress, Completed, Failed, Expired, Discarded }

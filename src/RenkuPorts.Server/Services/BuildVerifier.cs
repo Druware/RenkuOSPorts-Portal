@@ -239,8 +239,8 @@ public static class Verification
     }
 
     /// <summary>
-    /// Fails the job and emails the admins. The builds' staged blobs are kept, so an admin can still accept one of them
-    /// (approve endpoint); they are deleted when a build is accepted or the job is requeued.
+    /// Fails the job, files it under a (Recipe) build issue and emails the admins. The builds' staged blobs are kept, so an admin can still
+    /// accept one of them (approve endpoint); they are deleted when a build is accepted or the job is requeued.
     /// </summary>
     public static async Task FailAsync(AppDbContext db, Job job, string summary, DateTime now,
         UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs)
@@ -248,10 +248,13 @@ public static class Verification
         job.Status = JobStatus.Failed;
         job.FailureSummary = summary;
         job.CompletedAt = now;
+        var (issue, _) = await BuildIssues.CaptureAsync(db, job, summary, BuildIssueKind.Recipe, now);
         await db.SaveChangesAsync();
         var name = await db.Recipes.Where(r => r.Id == job.RecipeId).Select(r => r.PortName + " " + r.Version).FirstAsync();
+        // Mailed per failure, not per issue: an admin may still accept one of the builds, which is specific to this job.
         await BuildClientApi.NotifyAdmins(users, notifier, logs, $"[RenkuPorts] {name} failed verification on {job.Platform}",
-            $"Job {job.Id} ({name}, {job.Platform}): {summary}\n\nThe builds and their differences are on the Ports dashboard (Jobs).");
+            $"Job {job.Id} ({name}, {job.Platform}): {summary}\n\nFiled under build issue #{issue.Id}; the port is not queued again on {job.Platform} until it is resolved.\n\n" +
+            "The builds and their differences are on the Ports dashboard (Jobs).");
     }
 
     /// <summary>Discards a job's builds that still count (cancel, requeue): status Discarded, staged blobs deleted.</summary>

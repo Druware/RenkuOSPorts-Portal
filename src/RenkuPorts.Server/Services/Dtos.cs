@@ -20,6 +20,12 @@ public record JobDto(long Id, string PortName, string Version, string Platform, 
     bool HasLog, List<string> Packages, List<JobBuildDto> Builds, long? ApprovedBuildId, string? Approval, string? ApprovedBy,
     DateTime? ApprovedAt, string? ApprovalReason, bool SelfVerified);
 
+/// <summary>A <see cref="Data.BuildIssue"/> for admins; <see cref="Ports"/> are the ports with a job filed under it, with the latest such job.</summary>
+public record BuildIssueDto(long Id, string Platform, BuildIssueKind Kind, BuildIssueStatus Status, string Title, string Signature, int Count,
+    DateTime FirstSeenAt, DateTime LastSeenAt, string? Notes, long? ExampleJobId, string? ResolvedBy, DateTime? ResolvedAt, List<AffectedPortDto> Ports);
+
+public record AffectedPortDto(string PortName, long LatestJobId);
+
 /// <summary>One build of a job; <see cref="Diffs"/> (from the stored JSON) say how it differs from each earlier completed build.</summary>
 public record JobBuildDto(long Id, int Number, string ClientName, JobBuildStatus Status, DateTime ClaimedAt, DateTime? CompletedAt,
     DateTime? ExclusiveUntil, string? Digest, [property: System.Text.Json.Serialization.JsonIgnore] string? DiffJson, List<BuildPackageDto> Packages)

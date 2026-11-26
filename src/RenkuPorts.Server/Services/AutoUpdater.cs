@@ -133,6 +133,9 @@ public sealed partial class AutoUpdater(IServiceScopeFactory scopes, PriorityCom
                     skipped.Add(new(port, platform, $"{port}-{newest.Version}-{revision} already published; bump REVISION to rebuild"));
                 else targets.Add(platform);
             }
+            var blocked = await BuildIssues.BlockingAsync(db, port, targets);
+            skipped.AddRange(blocked.Select(b => new SkippedPort(port, b.Key, $"blocked by build issue #{b.Value}")));
+            targets.RemoveAll(blocked.ContainsKey);
             if (targets.Count == 0) continue;
             var jobs = await AdminEndpoints.QueueAsync(db, newest, targets, null);
             queued += jobs.Count;

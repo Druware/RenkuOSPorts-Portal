@@ -10,7 +10,11 @@ namespace RenkuPorts.Server.Endpoints;
 /// <summary>Admin-only: recipes, the job queue and the dashboard.</summary>
 public static class AdminEndpoints
 {
-    public record QueueRequest(string PortName, string? Version, string[] Platforms);
+    /// <summary>Body of <c>POST /api/jobs</c>; <see cref="Force"/> queues platforms where the port is blocked by a build issue too.</summary>
+    public record QueueRequest(string PortName, string? Version, string[] Platforms, bool Force = false);
+    /// <summary>Body of <c>POST /api/issues/{id}/resolve</c>; <see cref="Requeue"/> requeues the issue's failed jobs.</summary>
+    public record ResolveIssueRequest(string? Note, bool Requeue);
+    public record EscalateIssueRequest(string? Note);
     public record QueueTopRequest(int? Count);
     public record ApproveRequest(long BuildId, string? Reason, bool EmbedsDates);
     public record AutoUpdateRequest(bool Enabled, int IntervalHours, string[]? Platforms);
@@ -131,7 +135,7 @@ public static class AdminEndpoints
             return Results.Accepted();
         });
 
-        // The highest-priority outstanding ports with nothing published, queued or building on the platform yet.
+        // The highest-priority outstanding ports with nothing published, queued or building on the platform yet, and not blocked by a build issue.
         g.MapPost("/priorities/{platform}/queue-top", async (string platform, QueueTopRequest? req, ClaimsPrincipal user, UserManager<AppUser> users, AppDbContext db, PriorityComputer priorities) =>
         {
             if (!Validate.IsPlatform(platform)) return Results.NotFound();
@@ -141,7 +145,8 @@ public static class AdminEndpoints
             var top = await db.PortPriorities.Include(p => p.Recipe)
                 .Where(p => p.Platform == platform && p.Outstanding
                     && !PublicEndpoints.Published(db).Any(k => k.Platform == platform && k.PortName == p.PortName)
-                    && !db.Jobs.Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName && JobStatuses.Active.Contains(j.Status)))
+                    && !db.Jobs.Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName && JobStatuses.Active.Contains(j.Status))
+                    && !BuildIssues.Blocking(db).Any(j => j.Platform == platform && j.Recipe!.PortName == p.PortName))
                 .OrderByDescending(p => p.PinnedAt).ThenByDescending(p => p.Priority).ThenBy(p => p.PortName).Take(count).ToListAsync();
             var ids = new List<long>();
             foreach (var p in top) ids.AddRange((await QueueAsync(db, p.Recipe!, [platform], users.GetUserId(user)!)).Select(j => j.Id));
@@ -163,8 +168,13 @@ public static class AdminEndpoints
                 ? candidates.OrderByDescending(r => r.Version, VersionComparer.Instance).FirstOrDefault()
                 : candidates.FirstOrDefault(r => r.Version == req.Version);
             if (recipe is null) return Results.Problem(statusCode: 404, title: "Recipe not found", detail: $"{req.PortName} {req.Version}".Trim());
+            // Nothing is queued while any platform is blocked: the admin decides (force) rather than getting a partial queue.
+            if (!req.Force && await BuildIssues.BlockingAsync(db, recipe.PortName, req.Platforms) is { Count: > 0 } blocked)
+                return Results.Problem(statusCode: 409, title: "Blocked by build issues",
+                    detail: $"{recipe.PortName} is blocked by unresolved build issue(s) {string.Join(", ", blocked.Select(b => $"#{b.Value} ({b.Key})"))}. Resolve them, or queue with force.",
+                    extensions: new Dictionary<string, object?> { ["issueIds"] = blocked.Values.Distinct().Order().ToList() });
 
-            var ids = (await QueueAsync(db, recipe, req.Platforms, users.GetUserId(user)!)).Select(j => j.Id).ToList();
+            var ids = (await QueueAsync(db, recipe, req.Platforms, users.GetUserId(user)!, req.Force)).Select(j => j.Id).ToList();
             return Results.Ok(await db.Jobs.Where(j => ids.Contains(j.Id)).OrderBy(j => j.Id).Select(Project.Job).ToListAsync());
         });
 
@@ -184,15 +194,7 @@ public static class AdminEndpoints
             return Results.Stream(blob.Value.Content, "text/plain; charset=utf-8");
         });
 
-        // A requeued job starts over: its earlier builds no longer count.
-        g.MapPost("/jobs/{id:long}/requeue", (long id, AppDbContext db, BlobContainerClient blobs) =>
-            Transition(db, id, [JobStatus.Failed, JobStatus.Cancelled], j =>
-            {
-                j.Status = JobStatus.Queued;
-                j.QueuedAt = DateTime.UtcNow;
-                j.CompletedAt = null;
-                j.FailureSummary = null;
-            }, () => Verification.DiscardBuildsAsync(db, blobs, id)));
+        g.MapPost("/jobs/{id:long}/requeue", (long id, AppDbContext db, BlobContainerClient blobs) => RequeueAsync(db, blobs, id));
 
         g.MapPost("/jobs/{id:long}/cancel", (long id, AppDbContext db, BlobContainerClient blobs) =>
             Transition(db, id, [JobStatus.Queued, JobStatus.AwaitingOverride], j =>
@@ -390,6 +392,66 @@ public static class AdminEndpoints
             return Results.Ok(await EgressAsync(db, time));
         });
 
+        // Build issues (Services/BuildIssues.cs). status: open, escalated, resolved or all; without it, the open and escalated ones.
+        g.MapGet("/issues", async (string? status, AppDbContext db) =>
+        {
+            if (status is not (null or "open" or "escalated" or "resolved" or "all"))
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["status"] = ["open, escalated, resolved or all."] });
+            var q = db.BuildIssues.AsQueryable();
+            if (status is null) q = q.Where(i => i.Status != BuildIssueStatus.Resolved);
+            else if (status != "all")
+            {
+                var only = Enum.Parse<BuildIssueStatus>(status, ignoreCase: true);
+                q = q.Where(i => i.Status == only);
+            }
+            // shortcut: no paging, the 500 last seen; page like /jobs if issues pile up.
+            return Results.Ok(await IssueDtosAsync(db, q.OrderByDescending(i => i.LastSeenAt).ThenByDescending(i => i.Id).Take(500)));
+        });
+
+        g.MapGet("/issues/{id:long}", async (long id, AppDbContext db) =>
+            (await IssueDtosAsync(db, db.BuildIssues.Where(i => i.Id == id))).FirstOrDefault() is { } issue ? Results.Ok(issue) : Results.NotFound());
+
+        // Resolving unblocks the issue's ports; requeue also requeues its failed jobs (as /jobs/{id}/requeue does), which leave the issue.
+        g.MapPost("/issues/{id:long}/resolve", async (long id, ResolveIssueRequest req, ClaimsPrincipal user, AppDbContext db, BlobContainerClient blobs,
+            TimeProvider time, ILoggerFactory logs) =>
+        {
+            var issue = await db.BuildIssues.FindAsync(id);
+            if (issue is null) return Results.NotFound();
+            if (issue.Status == BuildIssueStatus.Resolved) return Results.Problem(statusCode: 409, title: "Issue is Resolved", detail: "It was resolved already.");
+            if (InvalidNote(req.Note) is { } invalid) return invalid;
+            var by = user.Identity?.Name ?? "admin";
+            var now = time.GetUtcNow().UtcDateTime;
+            (issue.Status, issue.ResolvedBy, issue.ResolvedAt) = (BuildIssueStatus.Resolved, by, now);
+            AppendNote(issue, now, by, "resolved", req.Note!.Trim());
+            await db.SaveChangesAsync();
+            var requeued = new List<long>();
+            if (req.Requeue)
+                foreach (var jobId in await db.Jobs.Where(j => j.IssueId == id && j.Status == JobStatus.Failed).Select(j => j.Id).ToListAsync())
+                    if (await RequeueAsync(db, blobs, jobId) is IStatusCodeHttpResult { StatusCode: 200 }) requeued.Add(jobId);
+            logs.CreateLogger("AdminEndpoints").LogInformation("{User} resolved build issue {Issue}; requeued jobs {Jobs}", by, id, requeued);
+            return Results.Ok(new { Issue = (await IssueDtosAsync(db, db.BuildIssues.Where(i => i.Id == id))).Single(), Requeued = requeued });
+        });
+
+        g.MapPost("/issues/{id:long}/escalate", async (long id, EscalateIssueRequest req, ClaimsPrincipal user, AppDbContext db, TimeProvider time,
+            UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs) =>
+        {
+            var issue = await db.BuildIssues.FindAsync(id);
+            if (issue is null) return Results.NotFound();
+            if (issue.Status != BuildIssueStatus.Open) return Results.Problem(statusCode: 409, title: $"Issue is {issue.Status}", detail: "Only an open issue can be escalated.");
+            if (InvalidNote(req.Note) is { } invalid) return invalid;
+            var by = user.Identity?.Name ?? "admin";
+            var note = req.Note!.Trim();
+            issue.Status = BuildIssueStatus.Escalated;
+            AppendNote(issue, time.GetUtcNow().UtcDateTime, by, "escalated", note);
+            await db.SaveChangesAsync();
+            var dto = (await IssueDtosAsync(db, db.BuildIssues.Where(i => i.Id == id))).Single();
+            await BuildClientApi.NotifyAdmins(users, notifier, logs, $"[RenkuPorts] Build issue #{id} on {issue.Platform} escalated",
+                $"{by} escalated build issue #{id} ({issue.Kind}, {issue.Platform}): {note}\n\n{issue.Title}\n\n" +
+                $"Seen {issue.Count} time(s) since {issue.FirstSeenAt:u}; ports blocked: {string.Join(", ", dto.Ports.Select(p => p.PortName))}.\n\n" +
+                "The issue and its build logs are on the Ports dashboard (Issues).");
+            return Results.Ok(dto);
+        });
+
         g.MapGet("/dashboard", async (AppDbContext db, RepoIndexer indexer) =>
         {
             var counts = await db.Jobs.GroupBy(j => new { j.Platform, j.Status }).Select(x => new { x.Key.Platform, x.Key.Status, N = x.Count() }).ToListAsync();
@@ -421,13 +483,15 @@ public static class AdminEndpoints
     internal static readonly SemaphoreSlim SyncLock = new(1, 1);
 
     /// <summary>
-    /// Queues <paramref name="recipe"/> for each of <paramref name="platforms"/> that has no active job for it yet.
+    /// Queues <paramref name="recipe"/> for each of <paramref name="platforms"/> that has no active job for it yet and, unless
+    /// <paramref name="force"/>, where its port is not blocked by a build issue (<see cref="BuildIssues.Blocking"/>).
     /// <paramref name="userId"/> null means queued by <see cref="AutoUpdater"/>. Returns the jobs created.
     /// </summary>
-    internal static async Task<List<Job>> QueueAsync(AppDbContext db, Recipe recipe, IEnumerable<string> platforms, string? userId)
+    internal static async Task<List<Job>> QueueAsync(AppDbContext db, Recipe recipe, IEnumerable<string> platforms, string? userId, bool force = false)
     {
         var busy = await db.Jobs.Where(j => j.RecipeId == recipe.Id && JobStatuses.Active.Contains(j.Status))
             .Select(j => j.Platform).ToListAsync();
+        if (!force) busy.AddRange((await BuildIssues.BlockingAsync(db, recipe.PortName, platforms)).Keys);
         var jobs = platforms.Distinct().Except(busy).Select(p => new Job
         {
             RecipeId = recipe.Id, Platform = p, Status = JobStatus.Queued, QueuedAt = DateTime.UtcNow, QueuedByUserId = userId,
@@ -436,6 +500,40 @@ public static class AdminEndpoints
         await db.SaveChangesAsync();
         return jobs;
     }
+
+    /// <summary>The issues with their affected ports: each port with a job still filed under the issue, and its latest such job.</summary>
+    private static async Task<List<BuildIssueDto>> IssueDtosAsync(AppDbContext db, IQueryable<BuildIssue> issues)
+    {
+        var list = await issues.AsNoTracking().ToListAsync();
+        var ids = list.Select(i => i.Id).ToList();
+        var jobs = (await db.Jobs.Where(j => j.IssueId != null && ids.Contains(j.IssueId.Value))
+            .Select(j => new { IssueId = j.IssueId!.Value, j.Recipe!.PortName, j.Id }).ToListAsync()).ToLookup(j => j.IssueId);
+        return list.Select(i => new BuildIssueDto(i.Id, i.Platform, i.Kind, i.Status, i.Title, i.Signature, i.Count, i.FirstSeenAt, i.LastSeenAt,
+            i.Notes, i.ExampleJobId, i.ResolvedBy, i.ResolvedAt,
+            jobs[i.Id].GroupBy(j => j.PortName).Select(g => new AffectedPortDto(g.Key, g.Max(j => j.Id))).OrderBy(p => p.PortName).ToList())).ToList();
+    }
+
+    /// <summary>A note is required, at most 1000 characters (as the approve endpoint's reason).</summary>
+    private static IResult? InvalidNote(string? note) => string.IsNullOrWhiteSpace(note) || note.Trim().Length > 1000
+        ? Results.ValidationProblem(new Dictionary<string, string[]> { ["note"] = ["A note is required (at most 1000 characters)."] })
+        : null;
+
+    private static void AppendNote(BuildIssue issue, DateTime now, string by, string action, string note) =>
+        issue.Notes = (issue.Notes is null ? "" : issue.Notes + "\n") + $"{now:yyyy-MM-dd HH:mm} UTC, {by} ({action}): {note}";
+
+    /// <summary>
+    /// Requeues a Failed or Cancelled job: it starts over (its earlier builds no longer count) and leaves its build issue, so it no
+    /// longer blocks its port (the issue itself stays as it is).
+    /// </summary>
+    private static Task<IResult> RequeueAsync(AppDbContext db, BlobContainerClient blobs, long id) =>
+        Transition(db, id, [JobStatus.Failed, JobStatus.Cancelled], j =>
+        {
+            j.Status = JobStatus.Queued;
+            j.QueuedAt = DateTime.UtcNow;
+            j.CompletedAt = null;
+            j.FailureSummary = null;
+            j.IssueId = null;
+        }, () => Verification.DiscardBuildsAsync(db, blobs, id));
 
     /// <summary>Applies a status change if the job is in one of the allowed states; 409 otherwise.</summary>
     /// <param name="after">Runs once the change is saved.</param>

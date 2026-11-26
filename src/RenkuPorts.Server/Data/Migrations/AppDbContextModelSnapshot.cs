@@ -311,6 +311,68 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.ToTable("BuildClients");
                 });
 
+            modelBuilder.Entity("RenkuPorts.Server.Data.BuildIssue", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<int>("Count")
+                        .HasColumnType("int");
+
+                    b.Property<long?>("ExampleJobId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("FirstSeenAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<DateTime>("LastSeenAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Platform")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ResolvedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("Signature")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("nvarchar(400)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("nvarchar(400)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Platform", "Signature");
+
+                    b.ToTable("BuildIssues");
+                });
+
             modelBuilder.Entity("RenkuPorts.Server.Data.DateEmbeddingPort", b =>
                 {
                     b.Property<string>("PortName")
@@ -485,6 +547,9 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.Property<bool>("HasLog")
                         .HasColumnType("bit");
 
+                    b.Property<long?>("IssueId")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTime?>("LeaseExpiresAt")
                         .HasColumnType("datetime2");
 
@@ -519,6 +584,8 @@ namespace RenkuPorts.Server.Data.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ClaimedByClientId");
+
+                    b.HasIndex("IssueId");
 
                     b.HasIndex("QueuedByUserId");
 
@@ -922,6 +989,11 @@ namespace RenkuPorts.Server.Data.Migrations
                         .HasForeignKey("ClaimedByClientId")
                         .OnDelete(DeleteBehavior.SetNull);
 
+                    b.HasOne("RenkuPorts.Server.Data.BuildIssue", "Issue")
+                        .WithMany()
+                        .HasForeignKey("IssueId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
                     b.HasOne("RenkuPorts.Server.Data.AppUser", "QueuedBy")
                         .WithMany()
                         .HasForeignKey("QueuedByUserId")
@@ -934,6 +1006,8 @@ namespace RenkuPorts.Server.Data.Migrations
                         .IsRequired();
 
                     b.Navigation("ClaimedBy");
+
+                    b.Navigation("Issue");
 
                     b.Navigation("QueuedBy");
 
