@@ -108,7 +108,10 @@ public static class AdminEndpoints
                     .ThenByDescending(x => x.r.Version).ThenBy(x => x.r.Id),
                 x => new RecipeDto(x.r.Id, x.r.PortName, x.r.Category, x.r.Version, x.r.RecipePath, x.r.RecipeUpdatedAt,
                     x.pp == null ? null : x.pp.Priority, x.pp == null ? null : x.pp.Dependents, x.pp == null ? null : x.pp.Outstanding,
-                    db.DateEmbeddingPorts.Any(d => d.PortName == x.r.PortName), x.pp == null ? null : x.pp.PinnedAt), page, pageSize));
+                    db.DateEmbeddingPorts.Any(d => d.PortName == x.r.PortName), x.pp == null ? null : x.pp.PinnedAt,
+                    db.Jobs.Where(j => j.RecipeId == x.r.Id && (platform == null || j.Platform == platform)).OrderByDescending(j => j.Id)
+                        .Select(j => j.Status == JobStatus.Succeeded ? "published" : JobStatuses.Active.Contains(j.Status) ? "queued" : j.Status == JobStatus.Failed ? "failed" : null)
+                        .FirstOrDefault()), page, pageSize));
         });
 
         // Clears a port's "embeds dates" flag (set by an admin override): its timestamp-only mismatches need an admin again.
@@ -185,7 +188,7 @@ public static class AdminEndpoints
             var q = db.Jobs.AsQueryable();
             if (status is not null) q = q.Where(j => j.Status == status);
             if (!string.IsNullOrEmpty(platform)) q = q.Where(j => j.Platform == platform);
-            return await Paged<JobDto>.FromAsync(q, o => o.OrderByDescending(j => j.Id), Project.Job, page, pageSize);
+            return await Paged<JobDto>.FromAsync(q, o => o.OrderByDescending(j => j.CompletedAt ?? j.QueuedAt).ThenByDescending(j => j.Id), Project.Job, page, pageSize);
         });
 
         issues.MapGet("/jobs/{id:long}/log", async (long id, AppDbContext db, BlobContainerClient blobs) =>

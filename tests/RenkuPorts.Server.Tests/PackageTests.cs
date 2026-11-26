@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
+using RenkuPorts.Server.Data;
 using RenkuPorts.Server.Services;
 
 namespace RenkuPorts.Server.Tests;
@@ -163,5 +164,34 @@ public partial class ApiTests
         Assert.Equal((2, 1, 1), (foo.Total, foo.Page, foo.PageSize));
         Assert.Empty((await admin.GetFromJsonAsync<PageView<RecipeView>>("/api/recipes?search=foo&page=3&pageSize=1"))!.Items);
         Assert.Equal(50, (await admin.GetFromJsonAsync<PageView<RecipeView>>("/api/recipes"))!.PageSize);
+    }
+
+    private record RecipeStatusView(int Id, string? Status);
+
+    [Fact]
+    public async Task Recipe_listing_shows_the_latest_jobs_status_on_the_platform()
+    {
+        var admin = await app.SignedInAsync();
+        int[] ids = [];
+        await app.WithDbAsync(async db =>
+        {
+            ids = await db.Recipes.OrderBy(r => r.Id).Select(r => r.Id).Take(4).ToArrayAsync();
+            Job J(int recipe, JobStatus status, string platform = "arm64") => new() { RecipeId = recipe, Platform = platform, Status = status, QueuedAt = DateTime.UtcNow };
+            // Added one by one so Ids follow this order: the failure after the success is the latest.
+            foreach (var j in new[] { J(ids[0], JobStatus.Succeeded), J(ids[1], JobStatus.Verifying), J(ids[2], JobStatus.Succeeded), J(ids[2], JobStatus.Failed),
+                J(ids[3], JobStatus.Succeeded, "x86_64"), J(ids[0], JobStatus.Cancelled, "x86_64") })
+            {
+                db.Jobs.Add(j);
+                await db.SaveChangesAsync();
+            }
+        });
+        async Task<string?[]> StatusesAsync(string query)
+        {
+            var items = (await admin.GetFromJsonAsync<PageView<RecipeStatusView>>($"/api/recipes?pageSize=200{query}"))!.Items;
+            return ids.Select(id => items.Single(r => r.Id == id).Status).ToArray();
+        }
+        Assert.Equal(new string?[] { "published", "queued", "failed", null }, await StatusesAsync("&platform=arm64"));
+        // Without a platform the latest job of any platform counts.
+        Assert.Equal(new string?[] { null, "queued", "failed", "published" }, await StatusesAsync(""));
     }
 }

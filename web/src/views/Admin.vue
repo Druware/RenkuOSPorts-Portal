@@ -754,7 +754,7 @@ watch(tab, (t) => {
       </div>
       <div class="table-wrap">
         <table :class="{ loading: recipesLoading }" :aria-busy="recipesLoading">
-          <thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Port</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Recipe updated</th><th scope="col" class="num">Priority</th><th scope="col" class="num">Dependents</th><th scope="col">Embeds dates</th></tr></thead>
+          <thead><tr><th scope="col"><span class="sr-only">Select</span></th><th scope="col">Port</th><th scope="col">Version</th><th scope="col">Category</th><th scope="col">Recipe updated</th><th scope="col" class="num">Priority</th><th scope="col" class="num">Dependents</th><th scope="col">Embeds dates</th><th scope="col">Status</th></tr></thead>
           <tbody>
             <tr v-for="r in recipes.items" :key="r.id" :class="{ selected: selected?.id === r.id }">
               <td><input type="radio" name="recipe" :id="`rc-${r.id}`" :checked="selected?.id === r.id" @change="selected = r" /></td>
@@ -766,8 +766,9 @@ watch(tab, (t) => {
               </td>
               <td class="num">{{ r.dependents ?? '—' }}</td>
               <td><button v-if="r.embedsDates" type="button" class="btn btn-small" :aria-label="`Clear the embeds-dates flag of ${r.portName}`" title="Timestamp-only differences of this port are approved automatically" @click="clearEmbedsDates(r)">Yes · Clear</button></td>
+              <td><span v-if="r.status" :class="['badge', { published: 'badge-Succeeded', queued: 'badge-Queued', failed: 'badge-Failed' }[r.status]]">{{ r.status }}</span></td>
             </tr>
-            <tr v-if="!recipesLoading && !recipes.items.length"><td colspan="8" class="muted">{{ recipes.total ? 'No recipes on this page.' : 'No recipes found. Try syncing the ports tree.' }}</td></tr>
+            <tr v-if="!recipesLoading && !recipes.items.length"><td colspan="9" class="muted">{{ recipes.total ? 'No recipes on this page.' : 'No recipes found. Try syncing the ports tree.' }}</td></tr>
           </tbody>
         </table>
       </div>

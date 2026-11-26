@@ -59,10 +59,10 @@ public static partial class BuildClientApi
                 case "owner": q = q.Where(j => j.ClaimedBy != null && j.ClaimedBy.OwnerId == client.OwnerId); break;
                 default: return Results.ValidationProblem(new Dictionary<string, string[]> { ["scope"] = ["all, mine or owner."] });
             }
-            // The live queue reads in claim order; finished jobs newest first, like the admin list.
+            // The live queue reads in claim order; finished jobs most recently completed (else queued) first, like the admin list.
             var live = want is null || JobStatuses.Active.Contains(want.Value);
             var result = await Paged<ClientJobDto>.FromAsync(WithQueueInfo(db, q, client.Platform),
-                o => live ? o.OrderByDescending(x => x.Priority).ThenBy(x => x.Job.QueuedAt).ThenBy(x => x.Job.Id) : o.OrderByDescending(x => x.Job.Id),
+                o => live ? o.OrderByDescending(x => x.Priority).ThenBy(x => x.Job.QueuedAt).ThenBy(x => x.Job.Id) : o.OrderByDescending(x => x.Job.CompletedAt ?? x.Job.QueuedAt).ThenByDescending(x => x.Job.Id),
                 ToClientJob(client), page, pageSize);
             return Results.Ok(result with { Items = await WithChainsAsync(db, client, result.Items) });
         });
