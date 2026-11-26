@@ -7,6 +7,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import CopyButton from '../components/CopyButton.vue'
 import Pager from '../components/Pager.vue'
 import UsersAdmin from '../components/UsersAdmin.vue'
+import ApiTokens from '../components/ApiTokens.vue'
 import IssuesAdmin from '../components/IssuesAdmin.vue'
 
 const tab = ref('dashboard')
@@ -654,7 +655,10 @@ watch(tab, (t) => {
     </HaikuWindow>
   </template>
 
-  <UsersAdmin v-else-if="tab === 'users'" />
+  <template v-else-if="tab === 'users'">
+    <UsersAdmin />
+    <ApiTokens />
+  </template>
   <IssuesAdmin v-else-if="tab === 'issues'" />
 
   <template v-else>

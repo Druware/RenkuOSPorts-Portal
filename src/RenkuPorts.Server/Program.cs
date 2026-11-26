@@ -44,7 +44,7 @@ var auth = builder.Services.AddAuthentication().AddJwtBearer(o =>
 {
     o.MapInboundClaims = false;
     o.TokenValidationParameters = ClientTokens.ValidationParameters(cfg);
-});
+}).AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, ApiTokenHandler>(ApiTokenEndpoints.Scheme, null);
 if (!string.IsNullOrEmpty(cfg["Auth:GitHub:ClientId"]))
 {
     auth.AddGitHub(o =>
@@ -57,6 +57,9 @@ if (!string.IsNullOrEmpty(cfg["Auth:GitHub:ClientId"]))
 }
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy("Admin", p => p.RequireRole("Admin"))
+    // The build-issue endpoints: an admin's cookie, or an admin's API token with the issues scope. Every other policy ignores tokens.
+    .AddPolicy("IssueWorker", p => p.AddAuthenticationSchemes(IdentityConstants.ApplicationScheme, ApiTokenEndpoints.Scheme).RequireRole("Admin")
+        .RequireAssertion(c => c.User.Identities.All(i => i.AuthenticationType != ApiTokenEndpoints.Scheme) || c.User.HasClaim("scope", ApiTokenEndpoints.IssuesScope)))
     .AddPolicy("BuildClient", p => p.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme).RequireClaim("sub"));
 
 // Blob:ServiceUri (managed identity) wins over the connection string.
@@ -129,6 +132,7 @@ AuthEndpoints.Map(app);
 ClientsEndpoints.Map(app);
 AdminEndpoints.Map(app);
 UserAdminEndpoints.Map(app);
+ApiTokenEndpoints.Map(app);
 BuildClientApi.Map(app);
 ImportEndpoints.Map(app);
 VersionEndpoints.Map(app);
