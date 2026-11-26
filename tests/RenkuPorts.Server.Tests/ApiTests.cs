@@ -262,6 +262,57 @@ public partial class ApiTests(AppFactory app) : IClassFixture<AppFactory>, IAsyn
     }
 
     [Fact]
+    public async Task Package_downloads_serve_a_single_byte_range_and_count_only_its_bytes()
+    {
+        var admin = await app.SignedInAsync();
+        var name = Hpkg("zlib");
+        await PublishAsync(admin, name); // 16 bytes
+        var anon = app.CreateClient();
+        Task<HttpResponseMessage> GetAsync(string? range)
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"/repo/arm64/packages/{name}");
+            if (range is not null) req.Headers.TryAddWithoutValidation("Range", range);
+            return anon.SendAsync(req);
+        }
+        try
+        {
+            await SetEgressAsync(800);
+            var full = await GetAsync(null);
+            Assert.Equal(HttpStatusCode.OK, full.StatusCode);
+            Assert.Equal("bytes", Assert.Single(full.Headers.AcceptRanges));
+            var bytes = await full.Content.ReadAsByteArrayAsync();
+            Assert.Equal(16, bytes.Length);
+
+            // pkgman's resume (bytes=N-), a closed range, a suffix, and an end past the file, clamped.
+            foreach (var (range, from, to) in new[] { ("bytes=10-", 10, 15), ("bytes=2-5", 2, 5), ("bytes=-4", 12, 15), ("bytes=3-99", 3, 15) })
+            {
+                var res = await GetAsync(range);
+                Assert.Equal(HttpStatusCode.PartialContent, res.StatusCode);
+                Assert.Equal($"bytes {from}-{to}/16", res.Content.Headers.ContentRange?.ToString());
+                Assert.Equal(to - from + 1, res.Content.Headers.ContentLength);
+                Assert.Equal(bytes[from..(to + 1)], await res.Content.ReadAsByteArrayAsync());
+            }
+            foreach (var range in new[] { "bytes=16-", "bytes=-0" })
+            {
+                var res = await GetAsync(range);
+                Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, res.StatusCode);
+                Assert.Equal("bytes */16", res.Content.Headers.ContentRange?.ToString());
+            }
+            // Several ranges are ignored: the whole file.
+            var multi = await GetAsync("bytes=0-1,4-5");
+            Assert.Equal(HttpStatusCode.OK, multi.StatusCode);
+            Assert.Equal(bytes, await multi.Content.ReadAsByteArrayAsync());
+
+            // Two full downloads and the served ranges (6 + 4 + 4 + 13); nothing for the 416s.
+            Assert.Equal(16 + 27 + 16, (await admin.GetFromJsonAsync<EgressView>("/api/settings/egress"))!.BytesServed);
+        }
+        finally
+        {
+            await SetEgressAsync(800);
+        }
+    }
+
+    [Fact]
     public async Task Fail_marks_failed_clears_claim_and_emails_admins()
     {
         var admin = await app.SignedInAsync();

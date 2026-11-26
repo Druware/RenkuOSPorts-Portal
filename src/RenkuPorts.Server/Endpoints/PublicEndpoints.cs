@@ -1,4 +1,6 @@
+using Azure;
 using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using Microsoft.EntityFrameworkCore;
 using RenkuPorts.Server.Data;
 using RenkuPorts.Server.Services;
@@ -57,14 +59,28 @@ public static class PublicEndpoints
             if (!Validate.IsPlatform(platform) || !Validate.IsHpkgName(fileName)) return Results.NotFound();
             var pkg = await Published(db).AsNoTracking().FirstOrDefaultAsync(p => p.Platform == platform && p.FileName == fileName);
             if (pkg is null) return Results.NotFound();
+            // pkgman resumes with "Range: bytes=<size>-" and appends whatever comes back, so a resumed download needs the tail only.
+            var range = ByteRange(ctx.Request, pkg.Size);
+            ctx.Response.Headers.AcceptRanges = "bytes";
+            if (range is { Length: 0 })
+            {
+                ctx.Response.Headers.ContentRange = $"bytes */{pkg.Size}";
+                return Results.StatusCode(StatusCodes.Status416RangeNotSatisfiable);
+            }
             try
             {
-                var blob = await blobs.GetBlobClient(pkg.BlobName).DownloadStreamingAsync(cancellationToken: ctx.RequestAborted);
-                // shortcut: counts the full length up front, so aborted downloads overcount; meter streamed bytes if that ever matters.
+                var options = new BlobDownloadOptions { Range = range is null ? default : new HttpRange(range.Value.Start, range.Value.Length) };
+                var blob = await blobs.GetBlobClient(pkg.BlobName).DownloadStreamingAsync(options, ctx.RequestAborted);
+                // shortcut: counts the served length up front, so aborted downloads overcount; meter streamed bytes if that ever matters.
                 if (!await Egress.TryAddAsync(db, time, blob.Value.Details.ContentLength, enforceCap: true, ctx.RequestAborted))
                 {
                     blob.Value.Dispose();
                     return Results.NotFound(); // this month's egress cap is reached
+                }
+                if (range is { } r)
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status206PartialContent;
+                    ctx.Response.Headers.ContentRange = $"bytes {r.Start}-{r.Start + r.Length - 1}/{pkg.Size}";
                 }
                 ctx.Response.ContentLength = blob.Value.Details.ContentLength;
                 return Results.Stream(blob.Value.Content, "application/octet-stream", fileName);
@@ -74,5 +90,25 @@ public static class PublicEndpoints
                 return Results.NotFound(); // row inserted, blob upload still running
             }
         });
+    }
+
+    /// <summary>
+    /// The single byte range of a <paramref name="length"/>-byte file that <paramref name="request"/> asks for. Null means the
+    /// whole file: no Range header, or one RFC 9110 lets a server ignore (malformed, another unit, several ranges). Length 0
+    /// means unsatisfiable (416).
+    /// </summary>
+    /// <remarks>
+    /// shortcut: If-Range is not evaluated (pkgman never sends it), so a resume across a republish under the same name gets mixed
+    /// bytes and fails its checksum; honour If-Range against the blob's ETag if a client that sends it ever needs this.
+    /// </remarks>
+    internal static (long Start, long Length)? ByteRange(HttpRequest request, long length)
+    {
+        var header = request.GetTypedHeaders().Range;
+        if (header is null || !header.Unit.Equals("bytes", StringComparison.OrdinalIgnoreCase) || header.Ranges.Count != 1) return null;
+        var r = header.Ranges.Single();
+        var (start, end) = r.From is { } from
+            ? (from, Math.Min(r.To ?? long.MaxValue, length - 1)) // bytes=N- or bytes=N-M
+            : (Math.Max(0, length - r.To!.Value), length - 1);    // bytes=-K: the last K bytes
+        return (start, Math.Max(0, end - start + 1));
     }
 }
