@@ -208,7 +208,7 @@ public static partial class Cleanup
 
     /// <summary>
     /// Danger zone: deletes everything built or imported for <paramref name="platform"/> (jobs with their builds and staged uploads, packages,
-    /// imports, build logs, package blobs and the repository index files), so the platform starts from scratch. Users, clients, recipes,
+    /// build issues, imports, build logs, package blobs and the repository index files), so the platform starts from scratch. Users, clients, recipes,
     /// priorities and settings stay. The caller marks the index and priorities dirty.
     /// </summary>
     /// <remarks>
@@ -231,6 +231,7 @@ public static partial class Cleanup
             staged = await db.StagedPackages.Where(s => s.Build!.Job!.Platform == platform).ExecuteDeleteAsync();
             builds = await db.JobBuilds.Where(b => b.Job!.Platform == platform).ExecuteDeleteAsync();
             jobs = await db.Jobs.Where(j => j.Platform == platform).ExecuteDeleteAsync();
+            await db.BuildIssues.Where(i => i.Platform == platform).ExecuteDeleteAsync();
             imports = await db.Imports.Where(i => i.Platform == platform).ExecuteDeleteAsync();
             await tx.CommitAsync();
         });

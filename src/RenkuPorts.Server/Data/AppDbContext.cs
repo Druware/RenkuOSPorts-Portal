@@ -18,6 +18,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<EgressUsage> EgressUsage => Set<EgressUsage>();
     public DbSet<PortPriority> PortPriorities => Set<PortPriority>();
     public DbSet<PortDependency> PortDependencies => Set<PortDependency>();
+    public DbSet<BuildIssue> BuildIssues => Set<BuildIssue>();
 
     /// <summary>All times are UTC; SQL Server drops the Kind, so mark values read back as UTC (JSON then ends in "Z").</summary>
     protected override void ConfigureConventions(ModelConfigurationBuilder c)
@@ -65,6 +66,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             e.Property(x => x.Approval).HasMaxLength(16);
             e.Property(x => x.ApprovedBy).HasMaxLength(256);
             e.Property(x => x.ApprovalReason).HasMaxLength(1000);
+            e.HasOne(x => x.Issue).WithMany().HasForeignKey(x => x.IssueId).OnDelete(DeleteBehavior.NoAction);
+        });
+
+        b.Entity<BuildIssue>(e =>
+        {
+            e.Property(x => x.Platform).HasMaxLength(16);
+            e.Property(x => x.Signature).HasMaxLength(Services.BuildIssues.MaxSignature);
+            e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Title).HasMaxLength(Services.BuildIssues.MaxTitle);
+            e.Property(x => x.ResolvedBy).HasMaxLength(256);
+            e.HasIndex(x => new { x.Platform, x.Signature });
         });
 
         b.Entity<JobBuild>(e =>

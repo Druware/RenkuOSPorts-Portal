@@ -22,6 +22,8 @@ public static partial class BuildClientApi
     public const long MaxUpload = 4L << 30;
     private const string ClientItem = "build-client";
     private const string ReleasedPrefix = "Released: ";
+    /// <summary>Releases of a job (claims given back or expired, since it was last queued) after which the next release fails it.</summary>
+    public const int MaxReleases = 3;
 
     public record TokenRequest(string? ClientId, string? Secret);
     public record LogBody(string? Log);
@@ -230,7 +232,8 @@ public static partial class BuildClientApi
             return res;
         });
 
-        // A failed build fails the job (as before verification existed): its builds' staged packages are deleted and admins emailed.
+        // A failed build fails the job (as before verification existed): its builds' staged packages are deleted, the failure is filed
+        // under a build issue, and admins are emailed when that issue is new.
         g.MapPost("/{id:long}/fail", async (long id, FailRequest req, HttpContext http, AppDbContext db, BlobContainerClient blobs,
             INotifier notifier, UserManager<AppUser> users, ILoggerFactory logs, TimeProvider time) =>
         {
@@ -241,43 +244,69 @@ public static partial class BuildClientApi
             var summary = string.IsNullOrWhiteSpace(req.Summary) ? "build failed" : req.Summary.Trim();
             if (summary.Length > 2000) summary = summary[..2000];
             if (req.Log is not null) await SaveLog(blobs, job, req.Log);
-            var now = time.GetUtcNow().UtcDateTime;
-            build!.Status = JobBuildStatus.Failed;
-            build.CompletedAt = now;
-            job.Status = JobStatus.Failed;
-            job.FailureSummary = summary;
-            job.CompletedAt = now;
-            job.ClaimedByClientId = null;
-            job.ClaimedAt = null;
-            job.LeaseExpiresAt = null;
-            var (res, saved) = await SaveJob(db, job);
-            if (saved)
-            {
-                await Verification.DropBlobsAsync(db, blobs, await db.JobBuilds.Where(b => b.JobId == job.Id).Select(b => b.Id).ToListAsync());
-                await NotifyAdmins(users, notifier, logs, $"[RenkuPorts] {job.Recipe!.PortName} {job.Recipe.Version} failed on {job.Platform}",
-                    $"Job {job.Id} ({job.Recipe.PortName} {job.Recipe.Version}, {job.Platform}) failed on build client '{client.Name}' " +
-                    $"(build {build.Number}, attempt {job.Attempts}).\n\n{summary}\n\nThe build log is on the Ports dashboard.");
-            }
-            return res;
+            return (await FailJobAsync(db, blobs, job, build!, client, summary, BuildIssues.Kind(summary), time, users, notifier, logs)).Result;
         });
 
         // The client gives the job back without a result (infrastructure failure, client stopped): it is requeued like an
         // expired lease, without the admin email. Attempts stays incremented: it counts claims, as it does after a lease expires.
-        g.MapPost("/{id:long}/release", async (long id, ReleaseRequest req, HttpContext http, AppDbContext db, BlobContainerClient blobs, TimeProvider time) =>
+        // The MaxReleases-th release since the job was last queued fails it instead (as /fail does, filed as an Environment issue),
+        // so a client whose environment cannot build it does not take it back forever.
+        g.MapPost("/{id:long}/release", async (long id, ReleaseRequest req, HttpContext http, AppDbContext db, BlobContainerClient blobs, TimeProvider time,
+            INotifier notifier, UserManager<AppUser> users, ILoggerFactory logs) =>
         {
             var client = (BuildClient)http.Items[ClientItem]!;
-            var (job, _, error) = await ClaimedBuild(db, id, client);
+            var (job, build, error) = await ClaimedBuild(db, id, client);
             if (job is null) return error!;
+
+            var reason = ReleasedPrefix + (string.IsNullOrWhiteSpace(req.Reason) ? "no reason given" : req.Reason.Trim());
+            if (reason.Length > 2000) reason = reason[..2000];
+            // Released and lease-expired claims both end Expired; those before the last (re)queue were dealt with already.
+            var earlier = await db.JobBuilds.CountAsync(b => b.JobId == id && b.Status == JobBuildStatus.Expired && b.ClaimedAt >= job.QueuedAt);
+            if (earlier + 1 >= MaxReleases)
+            {
+                if (req.Log is not null) await SaveLog(blobs, job, req.Log);
+                var (failed, saved) = await FailJobAsync(db, blobs, job, build!, client, reason, BuildIssueKind.Environment, time, users, notifier, logs);
+                return saved ? Results.NoContent() : failed;
+            }
 
             if ((await ReleaseClaimsAsync(db, blobs, time.GetUtcNow().UtcDateTime, client.Id, id)).Count == 0)
                 return Results.Problem(statusCode: 409, title: "Job changed concurrently (lease expired?)");
-            var reason = ReleasedPrefix + (string.IsNullOrWhiteSpace(req.Reason) ? "no reason given" : req.Reason.Trim());
-            if (reason.Length > 2000) reason = reason[..2000];
             if (req.Log is not null) await SaveLog(blobs, job, req.Log);
             // The release SQL changed the row version, so the tracked job cannot be saved; update the columns directly.
             await db.Jobs.Where(j => j.Id == id).ExecuteUpdateAsync(s => s.SetProperty(j => j.FailureSummary, reason).SetProperty(j => j.HasLog, job.HasLog));
             return Results.NoContent();
         });
+    }
+
+    /// <summary>
+    /// Fails <paramref name="job"/> and its open <paramref name="build"/> (the row version guards it: 409 if the lease expired meanwhile), files
+    /// the failure under a build issue, deletes the job's staged blobs, and emails the admins if the issue is new (one mail per issue).
+    /// </summary>
+    private static async Task<(IResult Result, bool Saved)> FailJobAsync(AppDbContext db, BlobContainerClient blobs, Job job, JobBuild build, BuildClient client,
+        string summary, BuildIssueKind kind, TimeProvider time, UserManager<AppUser> users, INotifier notifier, ILoggerFactory logs)
+    {
+        var now = time.GetUtcNow().UtcDateTime;
+        build.Status = JobBuildStatus.Failed;
+        build.CompletedAt = now;
+        job.Status = JobStatus.Failed;
+        job.FailureSummary = summary;
+        job.CompletedAt = now;
+        job.ClaimedByClientId = null;
+        job.ClaimedAt = null;
+        job.LeaseExpiresAt = null;
+        var (issue, created) = await BuildIssues.CaptureAsync(db, job, summary, kind, now);
+        var (res, saved) = await SaveJob(db, job);
+        if (saved)
+        {
+            await Verification.DropBlobsAsync(db, blobs, await db.JobBuilds.Where(b => b.JobId == job.Id).Select(b => b.Id).ToListAsync());
+            if (created)
+                await NotifyAdmins(users, notifier, logs, $"[RenkuPorts] New build issue #{issue.Id} on {job.Platform}: {job.Recipe!.PortName} {job.Recipe.Version} failed",
+                    $"Job {job.Id} ({job.Recipe.PortName} {job.Recipe.Version}, {job.Platform}) failed on build client '{client.Name}' " +
+                    $"(build {build.Number}, attempt {job.Attempts}).\n\n{summary}\n\n" +
+                    $"This opened build issue #{issue.Id} ({issue.Kind}). {job.Recipe.PortName} is not queued again on {job.Platform} until the issue is " +
+                    $"resolved, and later failures with the same cause are counted under it without another email. The issue and the build log are on the Ports dashboard (Issues).");
+        }
+        return (res, saved);
     }
 
     /// <summary>

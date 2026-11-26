@@ -96,6 +96,17 @@ public partial class ApiTests
         Assert.Equal("auto-update", (await admin.GetFromJsonAsync<PageView<System.Text.Json.JsonElement>>("/api/jobs?status=Queued"))!.Items[0].GetProperty("queuedBy").GetString());
         Assert.Equal(Head(repo), (await admin.GetFromJsonAsync<AutoView>("/api/settings/auto-update"))!.LastCommit);
 
+        // That build fails: the next change of the port is skipped while its build issue is open.
+        Assert.Equal(queued.Id, (await ClaimAsync(client)).JobId);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync($"/api/client/jobs/{queued.Id}/fail", new { summary = "build command exited with code 1" })).StatusCode);
+        long? issue = null;
+        await app.WithDbAsync(async db => issue = await db.Jobs.Where(j => j.Id == queued.Id).Select(j => j.IssueId).SingleAsync());
+        WriteRecipe(repo, "autoport", "1.0", 3);
+        Git(repo, "commit", "-q", "-am", "four");
+        var fourth = (await RunNowAsync(admin)).LastResult!;
+        Assert.Equal(0, fourth.Queued);
+        Assert.Contains(new SkipPortView("autoport", "arm64", $"blocked by build issue #{issue}"), fourth.Skipped);
+
         // A git error keeps the old commit and records the error.
         var before = Head(repo);
         await app.WithDbAsync(db => db.AutoUpdateSettings.ExecuteUpdateAsync(s => s.SetProperty(x => x.LastCommit, "0000000000000000000000000000000000000000")));

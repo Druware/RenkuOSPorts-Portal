@@ -143,6 +143,7 @@ public class AppFactory : WebApplicationFactory<Program>
         await db.JobBuilds.ExecuteDeleteAsync();
         await db.DateEmbeddingPorts.ExecuteDeleteAsync();
         await db.Jobs.ExecuteDeleteAsync();
+        await db.BuildIssues.ExecuteDeleteAsync();
         await db.PortPriorities.ExecuteDeleteAsync();
         await db.PortDependencies.ExecuteDeleteAsync();
         if (!await db.Recipes.AnyAsync()) await RecipeScanner.SyncAsync(db, PortsTree, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
