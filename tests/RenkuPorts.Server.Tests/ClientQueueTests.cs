@@ -121,6 +121,26 @@ public partial class ApiTests
     }
 
     [Fact]
+    public async Task Job_lists_sort_by_completed_else_queued_newest_first()
+    {
+        var admin = await app.SignedInAsync();
+        var (_, client) = await app.BuildClientAsync(admin);
+        var (old, mid, last) = ((await QueueAsync(admin, "zlib")).Id, (await QueueAsync(admin, "foo")).Id, (await QueueAsync(admin, "openexr30")).Id);
+        var t = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+        await app.WithDbAsync(async db =>
+        {
+            var jobs = await db.Jobs.Where(j => new[] { old, mid, last }.Contains(j.Id)).ToDictionaryAsync(j => j.Id);
+            (jobs[old].Status, jobs[old].QueuedAt, jobs[old].CompletedAt) = (JobStatus.Succeeded, t, t.AddHours(5)); // oldest id, finished last
+            (jobs[mid].Status, jobs[mid].QueuedAt, jobs[mid].CompletedAt) = (JobStatus.Succeeded, t.AddHours(1), t.AddHours(2));
+            (jobs[last].QueuedAt, jobs[last].CompletedAt) = (t.AddHours(3), null); // still queued: sorts by QueuedAt, between the two
+            await db.SaveChangesAsync();
+        });
+
+        Assert.Equal([old, last, mid], (await admin.GetFromJsonAsync<PageView<JobView>>("/api/jobs"))!.Items.Select(j => j.Id));
+        Assert.Equal([old, mid], (await ClientJobsAsync(client, "?status=Succeeded")).Items.Select(j => j.Id));
+    }
+
+    [Fact]
     public async Task Client_jobs_show_the_dependency_chain()
     {
         // openexr30 needs foo needs zlib on arm64; x86 has no edges.

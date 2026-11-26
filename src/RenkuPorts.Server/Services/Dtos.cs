@@ -63,9 +63,10 @@ public record ClientSelfDto(Guid Id, string Name, string Platform, string Owner,
 
 /// <summary>A recipe;<see cref="Priority"/>, <see cref="Dependents"/> and <see cref="Outstanding"/> are its port's <see cref="Data.PortPriority"/>
 /// on the platform the list was asked for, null without one or before the port's priority is computed; so is <see cref="PinnedAt"/>,
-/// set while an admin has the port pinned to the top there.</summary>
+/// set while an admin has the port pinned to the top there. <see cref="Status"/> is its latest job's there (any platform without one):
+/// <c>published</c>, <c>queued</c> or <c>failed</c>; null when cancelled or never queued.</summary>
 public record RecipeDto(int Id, string PortName, string Category, string Version, string RecipePath, DateTime RecipeUpdatedAt,
-    int? Priority = null, int? Dependents = null, bool? Outstanding = null, bool EmbedsDates = false, DateTime? PinnedAt = null);
+    int? Priority = null, int? Dependents = null, bool? Outstanding = null, bool EmbedsDates = false, DateTime? PinnedAt = null, string? Status = null);
 
 /// <summary>
 /// A published package. <see cref="Verification"/>: <c>verified</c> (matching builds of <see cref="VerifiedClients"/> different
